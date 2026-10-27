@@ -200,30 +200,181 @@ def parse_version(v):
 
 # ----------------------------------------------------------------------------- comentários
 # O texto de cada comentário vira espaço e as quebras de linha ficam: offsets e números de linha continuam
-# valendo, e nenhuma regra dispara em código comentado, nota ou TODO. Strings são respeitadas.
+# valendo, e nenhuma regra dispara em código comentado, nota ou TODO. Strings, template literals, regex literals
+# e corpos $$...$$ são respeitados. A varredura é linear: um '/*' sem '*/' não vira comentário até o fim do
+# arquivo nem custa tempo quadrático. Em template de servidor (PHP, Blade, ERB, Razor, e .html de Django, Jinja ou
+# Thymeleaf) o <!-- --> NÃO é comentário: o servidor executa o que está dentro dele.
 _NAO_QUEBRA = re.compile(r"[^\n]")
-_STR_LINHA = r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
-_STR_CRASE = r"`(?:\\.|[^`\\]){0,100000}`"
-_COM_C = r"/\*[\s\S]*?\*/|(?<![:\\])//[^\n]*"
-_COM_HTML = r"<!--[\s\S]*?-->"
-_COMENTARIO_RX = {
-    "c": re.compile(rf"(?P<s>{_STR_LINHA}|{_STR_CRASE})|(?P<c>{_COM_C})"),
-    "c_html": re.compile(rf"(?P<s>{_STR_LINHA}|{_STR_CRASE})|(?P<c>{_COM_HTML}|{_COM_C})"),
-    "html": re.compile(rf"(?P<s>{_STR_LINHA})|(?P<c>{_COM_HTML})"),
-    "php": re.compile(rf"(?P<s>{_STR_LINHA})|(?P<c>{_COM_HTML}|{_COM_C}|#(?!\[)[^\n]*)"),
-    "hash": re.compile(r'(?P<s>"""[\s\S]{0,200000}?"""|\'\'\'[\s\S]{0,200000}?\'\'\'|' + _STR_LINHA + r")|(?P<c>(?<![$?])#(?!\{)[^\n]*)"),
-    "sql": re.compile(r"(?P<s>'(?:''|[^']){0,100000}'|\"(?:\"\"|[^\"\n]){0,1000}\")|(?P<c>--[^\n]*|/\*[\s\S]*?\*/)"),
-}
+_C_PROXIMO = {"c": re.compile(r"[\"'`/]"), "c_html": re.compile(r"[\"'`/]|<!--"), "php": re.compile(r"[\"'`/#]")}
+_STR_ASPAS = {'"': re.compile(r'"(?:\\.|[^"\\\n])*"'), "'": re.compile(r"'(?:\\.|[^'\\\n])*'")}
+_REGEX_LITERAL = re.compile(r"/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n\[])+/[a-z]*")
+_ANTES_DE_REGEX = set("(,=:[!&|?{};+-*%<>~^")
+_PALAVRA_ANTES_DE_REGEX = re.compile(r"(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$")
+_HASH_RX = re.compile(r'(?P<s>"""[\s\S]{0,200000}?"""|\'\'\'[\s\S]{0,200000}?\'\'\'|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\')'
+                      r"|(?P<c>(?<![$?])#(?!\{)[^\n]*)")
 _MODO_COMENTARIO = {".py": "hash", ".rb": "hash", ".ex": "hash", ".exs": "hash", ".graphql": "hash", ".gql": "hash",
-                    ".php": "php", ".sql": "sql", ".erb": "html", ".html": "html", ".htm": "html", ".vue": "c_html",
-                    ".svelte": "c_html", ".astro": "c_html", ".razor": "c_html", ".cshtml": "c_html"}
+                    ".php": "php", ".sql": "sql", ".erb": "nenhum", ".html": "nenhum", ".htm": "nenhum", ".vue": "c_html",
+                    ".svelte": "c_html", ".astro": "c_html", ".razor": "c", ".cshtml": "c"}
+
+
+def _apagar(spans, text):
+    if not spans:
+        return text
+    partes, i = [], 0
+    for a, b in spans:
+        partes.append(text[i:a])
+        partes.append(_NAO_QUEBRA.sub(" ", text[a:b]))
+        i = b
+    partes.append(text[i:])
+    return "".join(partes)
+
+
+def _fim_crase(text, i):
+    """Fim do template literal que abre em text[i] (sem seguir ${} aninhado); -1 se não fecha."""
+    j, n = i + 1, min(len(text), i + 200_000)
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+        elif c == "`":
+            return j + 1
+        else:
+            j += 1
+    return -1
+
+
+def _regex_pode_comecar(text, j):
+    k = j - 1
+    while k >= 0 and text[k] in " \t":
+        k -= 1
+    if k < 0 or text[k] == "\n" or text[k] in _ANTES_DE_REGEX:
+        return True
+    return bool(_PALAVRA_ANTES_DE_REGEX.search(text[max(0, k - 12): k + 1]))
+
+
+def _tirar_c(text, modo):
+    prox = _C_PROXIMO[modo]
+    spans, i, n, sem_fecho = [], 0, len(text), False
+    while True:
+        m = prox.search(text, i)
+        if not m:
+            break
+        j = m.start()
+        c = text[j]
+        if c in "\"'":
+            mm = _STR_ASPAS[c].match(text, j)
+            i = mm.end() if mm else j + 1
+        elif c == "`":
+            k = _fim_crase(text, j)
+            i = k if k > 0 else j + 1
+        elif c == "<":  # <!-- --> em Vue, Svelte e Astro: o template não executa o que está no comentário
+            k = text.find("-->", j + 4)
+            k = n if k < 0 else k + 3
+            spans.append((j, k))
+            i = k
+        elif c == "#":  # PHP: '#' é comentário; '#[' é atributo
+            if text.startswith("#[", j):
+                i = j + 2
+                continue
+            k = text.find("\n", j)
+            k = n if k < 0 else k
+            spans.append((j, k))
+            i = k
+        else:
+            nxt = text[j + 1: j + 2]
+            if nxt == "/":
+                if j > 0 and text[j - 1] in ":\\":  # http:// em texto, \/\/ em regex
+                    i = j + 2
+                    continue
+                k = text.find("\n", j)
+                k = n if k < 0 else k
+                spans.append((j, k))
+                i = k
+            elif nxt == "*":
+                k = -1 if sem_fecho else text.find("*/", j + 2)
+                if k < 0:
+                    sem_fecho = True  # não há '*/' daqui para a frente: não era comentário
+                    i = j + 2
+                    continue
+                spans.append((j, k + 2))
+                i = k + 2
+            elif _regex_pode_comecar(text, j):
+                mm = _REGEX_LITERAL.match(text, j)
+                i = mm.end() if mm else j + 1
+            else:
+                i = j + 1
+    return _apagar(spans, text)
+
+
+def _tirar_html(text):
+    spans, i = [], 0
+    while True:
+        j = text.find("<!--", i)
+        if j < 0:
+            break
+        k = text.find("-->", j + 4)
+        k = len(text) if k < 0 else k + 3
+        spans.append((j, k))
+        i = k
+    return _apagar(spans, text)
+
+
+# SQL: strings '' e E'\'', identificadores "", corpos $tag$...$tag$ e comentários -- e /* */
+_SQL_PROXIMO = re.compile(r"(?<![\w$])[eE]'|'|\"|--|/\*|\$(?:[A-Za-z_]\w*)?\$")
+_SQL_STR = re.compile(r"'(?:''|[^'])*'")
+_SQL_ESTR = re.compile(r"[eE]'(?:\\.|''|[^'\\])*'")
+_SQL_IDENT = re.compile(r'"(?:""|[^"\n])*"')
+
+
+def _fim_sql_texto(text, j, tok, fim):
+    rx = _SQL_ESTR if tok in ("e'", "E'") else _SQL_STR if tok == "'" else _SQL_IDENT
+    mm = rx.match(text, j, fim)
+    return mm.end() if mm else j + len(tok)
+
+
+def _spans_sql(text, i, fim, spans, prof):
+    while True:
+        m = _SQL_PROXIMO.search(text, i, fim)
+        if not m:
+            return
+        j, tok = m.start(), m.group(0)
+        if tok == "--":
+            k = text.find("\n", j, fim)
+            k = fim if k < 0 else k
+            spans.append((j, k))
+            i = k
+        elif tok == "/*":
+            k = text.find("*/", j + 2, fim)
+            k = fim if k < 0 else k + 2
+            spans.append((j, k))
+            i = k
+        elif tok.startswith("$"):
+            k = text.find(tok, m.end(), fim)
+            if k < 0:
+                i = m.end()
+                continue
+            if prof < 3:  # corpo de função ou de DO: os comentários de dentro também saem, sem vazar para fora
+                _spans_sql(text, m.end(), k, spans, prof + 1)
+            i = k + len(tok)
+        else:
+            i = _fim_sql_texto(text, j, tok, fim)
 
 
 def tirar_comentarios(text, ext):
     if not any(m in text for m in ("//", "/*", "#", "--", "<!--")):
         return text
-    rx = _COMENTARIO_RX[_MODO_COMENTARIO.get(ext, "c")]
-    return rx.sub(lambda m: m.group(0) if m.group("c") is None else _NAO_QUEBRA.sub(" ", m.group("c")), text)
+    modo = _MODO_COMENTARIO.get(ext, "c")
+    if modo == "nenhum":
+        return text
+    if modo == "hash":
+        return _HASH_RX.sub(lambda m: m.group(0) if m.group("c") is None else _NAO_QUEBRA.sub(" ", m.group("c")), text)
+    if modo == "html":
+        return _tirar_html(text)
+    if modo == "sql":
+        spans = []
+        _spans_sql(text, 0, len(text), spans, 0)
+        return _apagar(spans, text)
+    return _tirar_c(text, modo)
 
 
 # ----------------------------------------------------------------------------- .gitignore e --ignorar
@@ -304,35 +455,111 @@ ARQUIVO_IGNORAR = ".check-pre-lancamento-ignore"
 
 
 # ----------------------------------------------------------------------------- SQL em comandos
-_SQL_TOKEN = re.compile(r"\$(?:[A-Za-z_]\w*)?\$|'(?:''|[^']){0,100000}'|;")
+_SQL_CORTE = re.compile(r"(?<![\w$])[eE]'|'|\"|\$(?:[A-Za-z_]\w*)?\$|;")
 _CORPO_DOLAR = re.compile(r"\$(\w*)\$[\s\S]*?\$\1\$")
+# Começo de comando dentro de bloco plpgsql (DO $$ ... $$): o que vem antes do CREATE/GRANT/ALTER
+_PLPGSQL_PREFIXO = re.compile(r"^(?:(?:begin|declare\b.*?\bbegin|else|elsif\b.*?\bthen|if\b.*?\bthen|loop|"
+                              r"exception\s+when\b.*?\bthen|when\b.*?\bthen)\s+)+", re.I | re.S)
 
 
-def sql_comandos(code):
-    """[(offset, texto normalizado sem corpo de função, texto cru)] de cada comando SQL.
-    Recebe o texto já sem comentários; respeita strings e corpos $$...$$ (que têm ';' dentro)."""
-    out, ini, tag = [], 0, None
-    for m in _SQL_TOKEN.finditer(code):
-        tok = m.group(0)
-        if tag is not None:
-            if tok == tag:
-                tag = None
-            continue
-        if tok.startswith("$"):
-            tag = tok
-            continue
+def _normalizar_sql(cru):
+    return re.sub(r"\s+", " ", _CORPO_DOLAR.sub("$$", cru).replace('"', "")).strip().rstrip(";").strip().lower()
+
+
+def sql_comandos(code, base=0):
+    """[(offset, texto normalizado sem corpo de função, texto cru)] de cada comando SQL de code (já sem comentários).
+    Respeita strings, E-strings, identificadores e corpos $$...$$ (que têm ';' dentro)."""
+    cortes, ini, i, n = [], 0, 0, len(code)
+    while True:
+        m = _SQL_CORTE.search(code, i)
+        if not m:
+            break
+        j, tok = m.start(), m.group(0)
         if tok == ";":
-            out.append((ini, code[ini:m.end()]))
-            ini = m.end()
+            cortes.append((ini, j + 1))
+            ini = i = j + 1
+        elif tok.startswith("$"):
+            k = code.find(tok, m.end())
+            i = k + len(tok) if k >= 0 else m.end()
+        else:
+            i = _fim_sql_texto(code, j, tok, n)
     if code[ini:].strip():
-        out.append((ini, code[ini:]))
+        cortes.append((ini, n))
     res = []
-    for off, cru in out:
+    for a, b in cortes:
+        cru = code[a:b]
         lead = len(cru) - len(cru.lstrip())
-        norm = re.sub(r"\s+", " ", _CORPO_DOLAR.sub("$$", cru).replace('"', "")).strip().rstrip(";").strip().lower()
+        cru = cru[lead:]
+        norm = _normalizar_sql(cru)
         if norm:
-            res.append((off + lead, norm, cru))
+            res.append((base + a + lead, norm, cru))
     return res
+
+
+def sql_comandos_expandidos(code, base=0, prof=0):
+    """sql_comandos + o que roda dentro de DO $$ ... $$ (policy idempotente, RLS e GRANT costumam ficar ali) e de
+    EXECUTE '...'. Os comandos de dentro vêm logo depois do bloco, na ordem."""
+    for off, norm, cru in sql_comandos(code, base):
+        if prof:
+            m = _PLPGSQL_PREFIXO.match(cru)
+            if m:
+                cru = cru[m.end():]
+                off += m.end()
+                norm = _normalizar_sql(cru)
+        yield off, norm, cru
+        if prof >= 2:
+            continue
+        if norm.startswith("do ") or norm.startswith("do$"):
+            m = re.search(r"\$(\w*)\$", cru)
+            k = cru.find(m.group(0), m.end()) if m else -1
+            if k > 0:
+                yield from sql_comandos_expandidos(cru[m.end():k], off + m.end(), prof + 1)
+        elif prof and norm.startswith("execute "):
+            m = re.match(r"execute\s+(?:format\s*\(\s*)?'((?:''|[^'])*)'", cru, re.I)
+            if m:
+                for _o, n2, c2 in sql_comandos(m.group(1).replace("''", "'")):
+                    yield off, n2, c2
+
+
+def _aridade(texto, ini):
+    """Quantos argumentos de entrada tem a lista que abre em texto[ini] == '(' (OUT não conta). (aridade, fim)."""
+    prof, j, partes, atual = 0, ini, [], []
+    while j < len(texto):
+        c = texto[j]
+        if c == "(":
+            prof += 1
+            if prof == 1:
+                j += 1
+                continue
+        elif c == ")":
+            prof -= 1
+            if prof == 0:
+                partes.append("".join(atual))
+                break
+        elif c == "," and prof == 1:
+            partes.append("".join(atual))
+            atual = []
+            j += 1
+            continue
+        atual.append(c)
+        j += 1
+    partes = [p.strip() for p in partes if p.strip()]
+    return sum(1 for p in partes if not re.match(r"(?i)out\s", p)), j
+
+
+def _alvos_funcao(txt):
+    """'function public.f(uuid), g()' → [('public.f', 1), ('public.g', 0)]; sem parênteses, aridade None."""
+    out, i = [], 0
+    for m in re.finditer(r"([\w$]+(?:\.[\w$]+)?)\s*(\()?", txt):
+        if m.start() < i or m.group(1) in ("function", "functions", "routine", "procedure", "if", "exists"):
+            continue
+        if m.group(2):
+            ar, i = _aridade(txt, m.end() - 1)
+            out.append((_nome_sql(m.group(1)), ar))
+        else:
+            out.append((_nome_sql(m.group(1)), None))
+            i = m.end()
+    return out
 
 
 def _nome_sql(n):
@@ -385,8 +612,14 @@ FERRAMENTA_DE_BUILD_RX = re.compile(
     r"@storybook/.+|storybook|rimraf|npm-run-all2?|dotenv-cli|@biomejs/biome|knip|depcheck|patch-package|eslint-config-next|"
     r"@next/eslint-plugin-next|@nuxt/devtools|@sveltejs/vite-plugin-svelte|@sveltejs/adapter-.+|@astrojs/check|electron-builder|"
     r"@electron-forge/.+|@tauri-apps/cli|@capacitor/cli)$")
-ARQUIVO_DE_BUILD_RX = re.compile(r"(^|/)[\w.-]*\.config\.[cm]?[jt]sx?$|(^|/)(scripts|tools|\.storybook|\.husky|bin)/|"
+ARQUIVO_DE_BUILD_RX = re.compile(r"(^|/)[\w.-]*\.config\.[cm]?[jt]sx?$|^(scripts|tools|bin)/|(^|/)(\.storybook|\.husky)/|"
                                  r"(^|/)(gulpfile|gruntfile|webpack\.[\w.-]+|rollup\.[\w.-]+)\.[cm]?[jt]s$", re.I)
+# Roda em produção mesmo quando só o arquivo de config importa (o framework é o próprio servidor)
+RUNTIME_DE_FRAMEWORK_RX = re.compile(
+    r"^(?:next|nuxt|nitropack|h3|@sveltejs/kit|astro|@astrojs/(?:node|vercel|netlify|cloudflare)|@remix-run/.+|react-router|"
+    r"@react-router/(?:node|serve|express)|@solidjs/start|@builder\.io/qwik-city|express|fastify|koa|hono|@hono/.+|elysia|"
+    r"@nestjs/.+|@adonisjs/.+|@vercel/node|@netlify/functions|vinxi)$")
+SCRIPT_DE_PRODUCAO_RX = re.compile(r":(?:start|serve|preview|prod|production|start:prod)$")
 
 
 # ----------------------------------------------------------------------------- scanner
@@ -417,7 +650,6 @@ class Scanner:
         self.avisos = []
         self.so_segredos = []  # fora do build ou --ignorar: ainda passam pela busca de segredo
         self.zonas = {}
-        self._gitignores = []
         self._uso_cache = {}
 
     # -- registro --------------------------------------------------------------
@@ -462,8 +694,6 @@ class Scanner:
             rel_dir = os.path.relpath(dirpath, self.root).replace("\\", "/")
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and d != ".git"
                            and not AGENT_DIR_RX.search(f"{rel_dir}/{d}")]
-            if ".gitignore" in filenames:
-                self._gitignores.append("" if rel_dir == "." else rel_dir + "/")
             if len(lidos) >= MAX_FILES:
                 self.truncated = True
                 break
@@ -493,52 +723,52 @@ class Scanner:
                     continue
                 else:
                     text = raw.decode("utf-8-sig", "replace")
-                lidos.append(SourceFile(self.root, p, text))
+                lidos.append(SourceFile(self.root, p, text.replace("\r\n", "\n")))
         self.classificar_zonas(lidos)
         # .env fica sempre (o que tem prefixo público vai pro bundle mesmo ignorado pelo git), menos dentro de pasta ignorada
         self.files = [f for f in lidos if f.zona == "app" or (f.kind == "env" and f.zona != "gitignore_pasta")]
-        # zip sem git não diz o que está versionado, e arquivo ignorado vai para o deploy feito da máquina: segredo é procurado em tudo
-        self.so_segredos = [f for f in lidos if f.zona != "app" and f.kind != "env"]
+        # arquivo ignorado vai para o deploy feito da máquina: segredo é procurado em tudo, .env de pasta ignorada inclusive
+        self.so_segredos = [f for f in lidos if f.zona != "app" and (f.kind != "env" or f.zona == "gitignore_pasta")]
 
     def classificar_zonas(self, arquivos):
-        """Marca o que fica fora das regras de código: .gitignore, pastas fora do build (docs/, examples/) e --ignorar."""
+        """Marca o que fica fora das regras de código: pastas do .gitignore, pastas fora do build (docs/, examples/) e
+        --ignorar. O .gitignore só vale quando a raiz é parte de um repositório com arquivos versionados e não é ela mesma
+        ignorada; num zip sem git (GitHub, Lovable, claude.ai) tudo o que veio está versionado e entra nas regras."""
         z = {"metodo_gitignore": None, "padroes_ignorar": [], "gitignore": {}, "fora_do_build": {}, "ignorado": {}}
         self.zonas = z
         if getattr(self.args, "varrer_tudo", False):
             z["metodo_gitignore"] = "desligado (--varrer-tudo)"
             return
         rels = [f.rel for f in arquivos]
-        pastas = sorted({"/".join(r.split("/")[:k]) + "/" for r in rels for k in range(1, r.count("/") + 1)})
-        ign_arq, ign_pasta = set(), set()
-        rc, out = 1, ""
-        if rels:
-            rc, out, _e = run(["git", "-c", "core.quotePath=false", "check-ignore", "--stdin", "-z"], self.root, 60,
-                              inp="\0".join(rels + pastas) + "\0")
-        if rc in (0, 1) and rels:
-            z["metodo_gitignore"] = "git check-ignore (respeita .gitignore, .git/info/exclude e o exclude global)"
-            hits = {p for p in out.split("\0") if p}
-            ign_pasta = {p for p in hits if p.endswith("/")}
-            ign_arq = hits - ign_pasta
-        elif self._gitignores:
-            z["metodo_gitignore"] = ".gitignore lido pelo scanner (pasta sem git)"
-            pads = []
-            for base in sorted(self._gitignores, key=len):
-                try:
-                    pads += ler_padroes((self.root / base / ".gitignore").read_text(errors="ignore"), base)
-                except Exception:
-                    pass
-            ign_pasta = {d for d in pastas if casa_padroes(pads, d + "\x00")}
-            ign_arq = {r for r in rels if casa_padroes(pads, r)}
+        ign_pasta, versionados = set(), set()
+        rc, _o, _e = run(["git", "rev-parse", "--is-inside-work-tree"], self.root, 15)
+        if rc != 0:
+            z["metodo_gitignore"] = "não aplicado: pasta sem git (num zip, tudo o que veio está versionado); use --ignorar para pastas locais"
         else:
-            z["metodo_gitignore"] = "sem .gitignore"
+            rc_ls, out_ls, _e = run(["git", "-c", "core.quotePath=false", "ls-files", "-z", "--", "."], self.root, 60)
+            versionados = {p for p in out_ls.split("\0") if p} if rc_ls == 0 else set()
+            rc_raiz, _o, _e = run(["git", "check-ignore", "-q", "--", "."], self.root, 15)
+            if not versionados or rc_raiz == 0:
+                z["metodo_gitignore"] = ("não aplicado: a pasta está dentro de um repositório git, mas sem arquivo versionado nela "
+                                         "(ou o próprio repositório a ignora); tudo entra nas regras")
+            else:
+                pastas = sorted({"/".join(r.split("/")[:k]) + "/" for r in rels for k in range(1, r.count("/") + 1)})
+                rc, out, _e = run(["git", "-c", "core.quotePath=false", "check-ignore", "--stdin", "-z"], self.root, 60,
+                                  inp="\0".join(pastas) + "\0") if pastas else (1, "", "")
+                if rc in (0, 1):
+                    ign_pasta = {p for p in out.split("\0") if p.endswith("/")}
+                    z["metodo_gitignore"] = "git check-ignore: pastas ignoradas pelo .gitignore, .git/info/exclude e o exclude global"
+                else:
+                    z["metodo_gitignore"] = "não aplicado: o git check-ignore falhou"
         pedidos = [p.strip() for a in (getattr(self.args, "ignorar", None) or []) for p in a.split(",") if p.strip()]
         arq = self.root / ARQUIVO_IGNORAR
-        if arq.is_file():
-            try:
-                pedidos += arq.read_text(errors="ignore").splitlines()
+        try:
+            st = arq.stat()
+            if stat.S_ISREG(st.st_mode) and st.st_size < 200_000:
+                pedidos += arq.read_text(encoding="utf-8", errors="replace").splitlines()
                 z["arquivo_ignorar"] = ARQUIVO_IGNORAR
-            except Exception:
-                pass
+        except OSError:
+            pass
         user_pads = ler_padroes("\n".join(re.sub(r"^\./", "", p.strip()) for p in pedidos))
         z["padroes_ignorar"] = [t for *_x, t in user_pads]
         # pasta com package.json ou com site publicado (GitHub Pages serve /docs) é app, não documentação
@@ -547,12 +777,8 @@ class Scanner:
         for f in arquivos:
             partes = f.rel.split("/")
             topo = next((d for d in ("/".join(partes[:k]) + "/" for k in range(1, len(partes))) if d in ign_pasta), None)
-            if topo:
+            if topo and f.rel not in versionados:  # arquivo versionado dentro de pasta ignorada continua valendo
                 f.zona, chave, grupo = "gitignore_pasta", "gitignore", topo
-            elif f.rel in ign_arq:
-                f.zona, chave, grupo = "gitignore", "gitignore", f.rel
-                if f.kind == "env":
-                    continue  # continua sendo lido
             elif user_pads and casa_padroes(user_pads, f.rel):
                 f.zona, chave, grupo = "ignorado", "ignorado", casa_padroes(user_pads, f.rel)
             elif len(partes) > 1 and partes[0].lower() in FORA_DO_BUILD and partes[0] not in com_package:
@@ -582,8 +808,8 @@ class Scanner:
                 partes.append(f"{b['arquivos']} {rotulo} ({nomes})")
         if partes:
             self.avisos.append("Fora das regras de código: " + "; ".join(partes) + ". Segredos continuam sendo procurados em "
-                               "todas essas pastas (no que o .gitignore ignora, com confiança baixa: não vai para o Git, mas vaza se "
-                               "entrar no build). Use --varrer-tudo para incluir tudo.")
+                               "todas essas pastas (nas que o .gitignore ignora, com confiança baixa: não vão para o Git, mas vazam se "
+                               "entrarem no build). Use --varrer-tudo para incluir tudo.")
         return out
 
     def code(self):
@@ -882,7 +1108,7 @@ class Scanner:
     def scan_secrets(self):
         fora = {id(f): f.zona for f in self.so_segredos}
         for f in self.files + self.so_segredos:
-            if f.kind == "env" and not is_env_example(f.name):
+            if f.kind == "env" and not is_env_example(f.name) and id(f) not in fora:
                 self.scan_env_file(f)
                 continue
             client = f.side == "client"
@@ -922,7 +1148,7 @@ class Scanner:
                     if fora.get(id(f), "").startswith("gitignore"):
                         if not re.search(r"(^|/)(public|static|www|wwwroot|assets|dist|build)/", f.rel):
                             conf = "baixa"
-                        note += " (arquivo ignorado pelo git: não vai para o repositório, mas vaza se entrar no build ou num deploy feito da sua máquina)"
+                        note += " (pasta ignorada pelo git: não vai para o repositório, mas vaza se entrar no build ou num deploy feito da sua máquina)"
                     elif id(f) in fora:
                         note += " (pasta fora das regras de código; se o arquivo está no Git, a chave vazou do mesmo jeito)"
                     if client and conf == "media" and pid not in ("google_api_key", "generic_assignment", "stripe_test"):
@@ -1217,8 +1443,8 @@ class Scanner:
         roles = {r.strip() for r in m.group(1).split(",") if r.strip()} if m else {"public"}
         if roles <= self.PAPEIS_SERVICO:
             return
-        aberta = re.search(r"\b(?:using|with check) \(\s*(?:\(\s*)?(?:true|1\s*=\s*1)(?:\s*\))?\s*\)", resto)
-        logado = re.search(r"\b(?:using|with check) \(\s*\(?\s*(?:auth\.role\(\)\s*=\s*'authenticated'|\(?\s*(?:select )?auth\.uid\(\)\s*\)?"
+        aberta = re.search(r"\b(?:using|with check)\s*\(\s*(?:\(\s*)?(?:true|1\s*=\s*1)(?:\s*\))?\s*\)", resto)
+        logado = re.search(r"\b(?:using|with check)\s*\(\s*\(?\s*(?:auth\.role\(\)\s*=\s*'authenticated'|\(?\s*(?:select )?auth\.uid\(\)\s*\)?"
                            r"\s+is not null)\s*\)?\s*\)", resto)
         if not aberta and not logado:
             return
@@ -1268,18 +1494,19 @@ class Scanner:
         def exposto(nome_completo):
             return nome_completo.split(".", 1)[0] in expostos
         nome = r"([\w$]+(?:\.[\w$]+)?)"
-        create_rx = re.compile(r"^create (?:(?:global |local )?(?:temp|temporary|unlogged) )?table (?:if not exists )?" + nome)
+        create_rx = re.compile(r"^create (?:unlogged )?table (?:if not exists )?" + nome)  # temp/temporary ficam fora
         alter_rx = re.compile(r"^alter table (?:if exists )?(?:only )?" + nome)
         policy_rx = re.compile(r'^create policy ("(?:[^"]|"")*"|[\w$]+) on ("?[\w$]+"?(?:\."?[\w$]+"?)?)(.*)$')
         grant_rx = re.compile(r"^grant (.+?) on (.+?) to (.+?)(?: with grant option)?(?: granted by [\w$]+)?$")
-        revoke_rx = re.compile(r"^revoke (?:grant option for )?(.+?) on (.+?) from (.+?)(?: granted by [\w$]+)?(?: cascade| restrict)?$")
+        revoke_rx = re.compile(r"^revoke (grant option for )?(.+?) on (.+?) from (.+?)(?: granted by [\w$]+)?(?: cascade| restrict)?$")
+        drop_func_rx = re.compile(r"^drop (?:function|procedure|routine) (?:if exists )?(.+?)(?: cascade| restrict)?$")
         adp_rx = re.compile(r"^alter default privileges(?: for (?:role|user) [\w$, ]+?)?(?: in schema ([\w$, ]+?))? (grant|revoke) "
                             r"(?:grant option for )?(.+?) on (tables|functions|routines|sequences|types|schemas) (?:to|from) (.+?)"
                             r"(?: with grant option)?(?: cascade| restrict)?$")
         func_rx = re.compile(r"^create (?:or replace )?(?:function|procedure) " + nome + r"\s*\(")
         alter_func_rx = re.compile(r"^alter (?:function|procedure|routine) " + nome + r"\s*\(")
         view_rx = re.compile(r"^create (?:or replace )?(?:temp |temporary )?(?:recursive )?(materialized )?view (?:if not exists )?" + nome)
-        alter_view_rx = re.compile(r"^alter (?:materialized )?view (?:if exists )?" + nome + r" (set|reset) \(([^)]*)\)")
+        alter_view_rx = re.compile(r"^alter (?:materialized )?view (?:if exists )?" + nome + r" (set|reset)\s*\(([^)]*)\)")
         invoker_falso = re.compile(r"security_invoker\s*=\s*'?(?:false|off|0|no)\b")
 
         def privs(txt):
@@ -1303,8 +1530,7 @@ class Scanner:
                 return "todas_" + tipo, [x.strip() for x in m.group(2).split(",")]
             m = re.match(r"(?:function|routine|procedure) (.+)$", txt)
             if m:
-                nomes = re.findall(r"([\w$]+(?:\.[\w$]+)?)\s*(?:\(|,|$)", re.sub(r"\([^)]*\)", "()", m.group(1)))
-                return "functions", [_nome_sql(x) for x in nomes]
+                return "functions", _alvos_funcao(m.group(1))
             if re.match(r"(?:sequence|schema|database|large object|foreign|language|tablespace|type|domain|parameter) ", txt):
                 return None, []
             return "tables", [_nome_sql(x) for x in re.sub(r"^table ", "", txt).split(",") if x.strip()]
@@ -1326,8 +1552,13 @@ class Scanner:
             if pv & self.ESCRITA and quem & {"anon", "public"}:
                 origem_anon.append(onde)
 
+        def chaves(nome_ar):  # (nome, aridade ou None) → chaves de funcs que casam (sobrecarga é outra função)
+            nome_f, ar = nome_ar
+            return [k for k in funcs if k[0] == nome_f and (ar is None or k[1] == ar)]
+
+        papel_api = False
         for f in sql_files:
-            for off, norm, cru in sql_comandos(f.code):
+            for off, norm, cru in sql_comandos_expandidos(f.code):
                 n = f.lineno(off)
                 ln = f.line(n)
                 onde = (f, n, ln)
@@ -1362,6 +1593,7 @@ class Scanner:
                     if not {x.strip() for x in (m.group(1) or "public").split(",")} & expostos:
                         continue
                     op, pv, objt, quem = m.group(2), privs(m.group(3)), m.group(4), papeis(m.group(5))
+                    papel_api = papel_api or bool(quem & {"anon", "authenticated"})
                     for p in quem:
                         if objt == "tables":
                             atual = adp_tab.setdefault(p, set())
@@ -1378,15 +1610,16 @@ class Scanner:
                     pv, (tipo, objs), quem = privs(m.group(1)), alvo(m.group(2)), papeis(m.group(3))
                     if not quem or not tipo:
                         continue
+                    papel_api = papel_api or bool(quem & {"anon", "authenticated"})
                     if tipo == "todas_tables" and set(objs) & expostos:
-                        for t in list(created) + list(views):
+                        for t in [x for x in list(created) + list(views) if x.split(".", 1)[0] in objs]:
                             dar(t, quem, pv, onde)
-                        massa_tab.append((f, n, ln, sorted(quem), pv))
+                        massa_tab.append((f, n, ln, sorted(quem), pv, sorted(set(objs) & expostos)))
                     elif tipo == "tables":
                         for t in objs:
                             dar(t, quem, pv, onde)
                     elif tipo == "todas_functions" and set(objs) & expostos and "execute" in pv:
-                        publicas = [fn for k, fn in funcs.items() if k.split(".", 1)[0] in set(objs) & expostos]
+                        publicas = [fn for k, fn in funcs.items() if k[0].split(".", 1)[0] in set(objs) & expostos]
                         for fn in publicas:
                             for p in quem:
                                 if fn["exec"][p] is False:  # tinha sido fechada de propósito
@@ -1394,17 +1627,19 @@ class Scanner:
                                 fn["exec"][p] = True
                         massa_fun.append((f, n, ln, sorted(quem), sum(1 for fn in publicas if fn["secdef"] and not fn["trigger"])))
                     elif tipo == "functions" and "execute" in pv:
-                        for nf in objs:
-                            if nf in funcs:
-                                for p in quem:
-                                    funcs[nf]["exec"][p] = True
+                        for k in [k for alvo_f in objs for k in chaves(alvo_f)]:
+                            for p in quem:
+                                funcs[k]["exec"][p] = True
                     continue
                 m = revoke_rx.match(norm) if norm.startswith("revoke ") else None
                 if m:
                     houve_permissao = True
-                    pv, (tipo, objs), quem = privs(m.group(1)), alvo(m.group(2)), papeis(m.group(3))
+                    if m.group(1):
+                        continue  # "revoke grant option for" só tira a opção de repassar; o privilégio fica
+                    pv, (tipo, objs), quem = privs(m.group(2)), alvo(m.group(3)), papeis(m.group(4))
                     if not quem or not tipo:
                         continue
+                    papel_api = papel_api or bool(quem & {"anon", "authenticated"})
                     if tipo in ("tables", "todas_tables"):
                         alvos = objs if tipo == "tables" else [t for t in list(created) + list(views) if t.split(".", 1)[0] in objs]
                         for t in alvos:
@@ -1414,27 +1649,33 @@ class Scanner:
                                 if "select" in pv:
                                     revogado.setdefault(t, set()).add(p)
                     elif tipo in ("functions", "todas_functions") and "execute" in pv:
-                        alvos = objs if tipo == "functions" else [k for k in funcs if k.split(".", 1)[0] in objs]
-                        for nf in alvos:
-                            if nf in funcs:
-                                for p in quem:
-                                    funcs[nf]["exec"][p] = False
+                        alvos = [k for alvo_f in objs for k in chaves(alvo_f)] if tipo == "functions" else \
+                            [k for k in funcs if k[0].split(".", 1)[0] in objs]
+                        for k in alvos:
+                            for p in quem:
+                                funcs[k]["exec"][p] = False
+                    continue
+                m = drop_func_rx.match(norm)
+                if m:  # função apagada: a que nascer com o mesmo nome volta ao padrão do Postgres (EXECUTE para PUBLIC)
+                    for k in [k for alvo_f in _alvos_funcao(m.group(1)) for k in chaves(alvo_f)]:
+                        funcs.pop(k, None)
                     continue
                 m = func_rx.match(norm)
                 if m:
                     nf = _nome_sql(m.group(1))
+                    chave = (nf, _aridade(norm, m.end() - 1)[0])
                     attrs = {"secdef": " security definer" in norm, "search_path": " set search_path" in norm,
                              "trigger": bool(re.search(r"\breturns (?:event_)?trigger\b", norm)), "f": f, "n": n, "ln": ln}
-                    if nf in funcs:
-                        funcs[nf].update(attrs)
+                    if chave in funcs:  # create or replace mantém os privilégios
+                        funcs[chave].update(attrs)
                     else:
-                        funcs[nf] = {"nome": nf, **attrs, "exec": {"public": adp_fun.get("public", True), "anon": adp_fun.get("anon", True),
+                        funcs[chave] = {"nome": nf, **attrs, "exec": {"public": adp_fun.get("public", True), "anon": adp_fun.get("anon", True),
                                                                     "authenticated": adp_fun.get("authenticated", True)}}
                     continue
                 m = alter_func_rx.match(norm)
                 if m:
-                    fn = funcs.get(_nome_sql(m.group(1)))
-                    if fn:
+                    for k in chaves((_nome_sql(m.group(1)), _aridade(norm, m.end() - 1)[0])):
+                        fn = funcs[k]
                         if " security definer" in norm:
                             fn["secdef"] = True
                         if " security invoker" in norm:
@@ -1445,7 +1686,7 @@ class Scanner:
                 m = view_rx.match(norm)
                 if m:
                     v = _nome_sql(m.group(2))
-                    opts = re.search(r"\bwith \(([^)]*security_invoker[^)]*)\)", norm)
+                    opts = re.search(r"\bwith\s*\(([^)]*security_invoker[^)]*)\)", norm)
                     if exposto(v):
                         views[v] = {"f": f, "n": n, "ln": ln, "mat": bool(m.group(1)),
                                     "invoker": bool(opts) and not invoker_falso.search(opts.group(1))}
@@ -1466,7 +1707,10 @@ class Scanner:
         for t, (f, n) in disabled.items():
             self.add("C04", "rls_desativado", f, n, f.line(n), "alta", f"RLS desativado explicitamente em {t}")
 
-        anon_w = sorted({t for p in ("anon", "public") for t, pv in tab[p].items() if pv & self.ESCRITA})
+        api = supa or papel_api  # sem Supabase nem GRANT para anon/authenticated, o banco não está exposto por API
+        if not api:
+            massa_tab, massa_fun, padrao, funcs, views, origem_anon = [], [], [], {}, {}, []
+        anon_w = sorted({t for p in ("anon", "public") for t, pv in tab[p].items() if pv & self.ESCRITA}) if api else []
         if anon_w and origem_anon:
             f0, n0, ln0 = origem_anon[0]
             nomes = ", ".join(t.split(".", 1)[-1] for t in anon_w[:12]) + ("…" if len(anon_w) > 12 else "")
@@ -1476,10 +1720,10 @@ class Scanner:
                      "Hoje só a RLS separa o visitante dos dados, e uma policy errada vira escrita pública. Revogue a escrita do anon "
                      "nas tabelas que o visitante não escreve (quase sempre todas).")
         visivel = {"select", "insert", "update", "delete", "truncate"}
-        for f, n, ln, quem, pv in massa_tab:
+        for f, n, ln, quem, pv, esquemas in massa_tab:
             anon = bool(set(quem) & {"anon", "public"})
             self.add("C04", "grant_em_massa_tabelas", f, n, ln, "alta" if anon and pv & self.ESCRITA and sem_rls else "media",
-                     f"GRANT {', '.join(sorted(pv & visivel))} em todas as tabelas do schema public para {', '.join(quem)}: reabre também "
+                     f"GRANT {', '.join(sorted(pv & visivel))} em todas as tabelas do schema {', '.join(esquemas)} para {', '.join(quem)}: reabre também "
                      "as tabelas privadas e as que ainda não têm RLS. É a correção errada mais comum para o erro 42501 (permission "
                      "denied) que vem com a mudança do Supabase de 30/10/2026. Dê GRANT por tabela, só ao papel que precisa.")
         for f, n, ln, quem, k in massa_fun:
@@ -2510,6 +2754,12 @@ class Scanner:
                                                         for t in joined.values())
 
     # -- P01–P10 prontidão para o lançamento ----------------------------------------
+    HOST_DE_TERCEIRO_RX = re.compile(
+        r"(?:^|\.)(?:(?<!docs\.)(?<!sites\.)google\.com|gstatic\.com|recaptcha\.net|hcaptcha\.com|cloudflare\.com|stripe\.com|"
+        r"paypal\.com|mercadopago\.com(?:\.br)?|mercadolivre\.com(?:\.br)?|pagar\.me|pagseguro\.uol\.com\.br|asaas\.com|apple\.com|"
+        r"microsoft\.com|live\.com|facebook\.com|meta\.com|instagram\.com|whatsapp\.com|twitter\.com|x\.com|linkedin\.com|"
+        r"youtube\.com|tiktok\.com|github\.com|gitlab\.com|vercel\.com|netlify\.com|supabase\.(?:com|co)|lovable\.dev|"
+        r"bolt\.new|replit\.com|openai\.com|anthropic\.com|amazon\.com|mozilla\.org|wikipedia\.org)$", re.I)
     ENV_REF_RX = re.compile(
         r"process\.env\.([A-Z][A-Z0-9_]+)|process\.env\[\s*['\"]([A-Z][A-Z0-9_]+)['\"]\s*\]|import\.meta\.env\.([A-Z][A-Z0-9_]+)|"
         r"os\.environ(?:\.get)?\(\s*['\"]([A-Z][A-Z0-9_]+)['\"]|os\.environ\[\s*['\"]([A-Z][A-Z0-9_]+)['\"]\s*\]|os\.getenv\(\s*['\"]([A-Z][A-Z0-9_]+)['\"]|"
@@ -2648,14 +2898,15 @@ class Scanner:
         rota_rx = re.compile(r"""(?:\bpath\s*[:=(]\s*|\bpath=\s*\{?\s*|createFileRoute\(\s*|Route::(?:get|view|any|match)\(\s*|\bget\s+|\bpath\(\s*)"""
                              r"""['"`]/?((?:[\w-]+/)*[\w-]*""" + chave + r"""[\w-]*)/?['"`]""", re.I)
         link_rx = re.compile(r"""['"`](/(?:[\w-]+/)*[\w-]*""" + chave + r"""[\w-]*)/?['"`]""", re.I)
-        externo_rx = re.compile(r"""https?://[^'"`\s)]*""" + chave, re.I)
+        externo_rx = re.compile(r"""https?://([^/'"`\s)?#:]+)[^'"`\s)]*""" + chave, re.I)
         links, fora = [], set()
         for f in code + [x for x in self.files if x.ext in (".html", ".htm")]:
             t = f.code
             for m in rota_rx.finditer(t):
                 fora |= conceitos_em(m.group(1))
             for m in externo_rx.finditer(t):
-                fora |= conceitos_em(m.group(0).split("//", 1)[-1])
+                if not self.HOST_DE_TERCEIRO_RX.search(m.group(1)):  # o aviso do reCAPTCHA linka a política do Google
+                    fora |= conceitos_em(m.group(0).split("//", 1)[-1])
             for m in link_rx.finditer(t):
                 if not re.match(r"/(?:api|rest|v\d+|functions|graphql|trpc|auth|storage|_next|static|assets)/", m.group(1), re.I):
                     links.append((m.group(1), f, f.lineno(m.start())))
@@ -3055,13 +3306,14 @@ class Scanner:
         for f in self.code():
             if pkg in f.text and rx.search(f.code):
                 onde.add("build" if TEST_PATH_RX.search(f.rel) or ARQUIVO_DE_BUILD_RX.search(f.rel) else "producao")
-        if "producao" in onde:
-            r = "producao"
-        elif onde or FERRAMENTA_DE_BUILD_RX.match(pkg):
+        curto = pkg.rsplit("/", 1)[-1]
+        nos_scripts = [k for k, v in self.pkg_scripts.items() if re.search(r"(?:^|[\s;&|(])%s(?:\s|$)" % re.escape(curto), v)]
+        if "producao" in onde or RUNTIME_DE_FRAMEWORK_RX.match(pkg) or any(SCRIPT_DE_PRODUCAO_RX.search(k) for k in nos_scripts):
+            r = "producao"  # importado pelo app, framework que é o servidor, ou chamado no start/serve/preview
+        elif onde or FERRAMENTA_DE_BUILD_RX.match(pkg) or nos_scripts:
             r = "build"
         else:
-            curto = pkg.rsplit("/", 1)[-1]
-            r = "build" if any(re.search(r"(?:^|[\s;&|(])%s(?:\s|$)" % re.escape(curto), v) for v in self.pkg_scripts.values()) else None
+            r = None
         self._uso_cache[pkg] = r
         return r
 

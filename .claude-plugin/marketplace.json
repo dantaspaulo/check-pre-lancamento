@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Check pré-lançamento de apps: 20 checagens de segurança + 10 de prontidão, com nota, veredito e correções prontas. Por Paulo Sérgio Dantas.",
-    "version": "2.1.0"
+    "version": "2.2.0"
   },
   "plugins": [
     {
       "name": "check-pre-lancamento",
       "source": "./",
       "description": "Audita o app antes de ir pro ar (Lovable, Bolt, v0, Replit e código próprio em React, Next, Vue, Angular, Node, Laravel, Django, Rails, Spring, .NET, Go): segredos, RLS, auth, IDOR, injeção, headers, HTTPS, dependências, e-mail, LGPD, SEO e custos.",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "author": {
         "name": "Paulo Sérgio Dantas",
         "email": "contato@paulosdantas.adv.br"

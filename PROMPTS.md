@@ -25,6 +25,12 @@ Prompts prontos para colar no agente (Claude Code, claude.ai, Codex, Cursor, Cop
 | PA13 | Checklist do dia do lançamento | sempre, antes de lançar |
 | PA14 | Conferir de novo e comparar com a análise anterior | depois de corrigir |
 | PA15 | Explicar o relatório para quem não é técnico | sempre |
+| PA16 | Duas requisições ao mesmo tempo | engenharia: estoque, vaga, cupom, crédito ou saldo |
+| PA17 | Webhook e pagamento que aguentam repetição | engenharia: C06 com webhook ou pagamento |
+| PA18 | Regra de negócio que o navegador decide | engenharia: C07 ou C08 |
+| PA19 | Testes de integração nos fluxos que não podem quebrar | engenharia: P04, antes de mudança grande |
+| PA20 | Dividir um arquivo grande sem mudar o que o app faz | engenharia: depois do PA19 |
+| PA21 | Raio-x de engenharia, sem alterar nada | engenharia: para escolher por onde começar |
 
 ---
 
@@ -216,6 +222,102 @@ Não marque nada como OK sem evidência.
 
 ```text
 Leia check-report/RELATORIO.md e me explique como se eu não fosse técnico: o que está em risco, o que alguém mal-intencionado conseguiria fazer, o que precisa ser feito antes de lançar e quanto tempo cada coisa leva, mais ou menos. Até 15 linhas, sem jargão. Termine com uma frase dizendo se dá para lançar e com qual condição.
+```
+
+---
+
+## Engenharia: depois do lançamento
+
+Os prompts PA16 a PA21 vão além das 30 checagens. Eles tratam de defeitos que aparecem cedo em app feito rápido com IA: pedido duplicado, webhook processado duas vezes, regra que o navegador decide e mudança que quebra outra coisa sem ninguém ver. Os temas vieram de uma sugestão de usuário, a partir de um material de @manodeyvin; os textos foram escritos para esta skill.
+
+Antes de colar qualquer um deles:
+- trabalhe numa branch separada, se o projeto usa git;
+- leia o plano que o agente propõe antes de deixar ele mexer;
+- toda migration passa pelos seus olhos antes de rodar, e teste nenhum encosta no banco de produção;
+- se não entendeu o que o prompt vai fazer, pergunte ao agente antes de colar.
+
+Ordem sugerida: PA21 (raio-x, só leitura) → PA19 (testes, para travar o comportamento de hoje) → PA18 (regra no navegador) → PA16 e PA17 (corrida e repetição, onde mora o dinheiro) → PA20 (dividir arquivo grande, com os testes já protegendo).
+
+## PA16 · Duas requisições ao mesmo tempo
+<!-- quando: engenharia -->
+**Quando usar:** o app vende, reserva ou consome algo limitado (estoque, vaga, cupom, crédito, convite, saldo). Clique duplo, duas abas abertas ou o celular reenviando não podem virar dois pedidos.
+
+```text
+Quero saber se o app aguenta a mesma ação chegando duas vezes ao mesmo tempo (clique duplo, duas abas, o celular reenviando).
+1. Se não estiver claro no código, me pergunte o que é limitado neste app: estoque, vagas, cupons, créditos, saldo, convites. Depois liste, com arquivo e linha, cada ponto em que esse recurso é conferido e em seguida alterado.
+2. Antes de corrigir, escreva para cada ponto um teste que dispara as duas chamadas em paralelo e mostra o estrago (dois pedidos, saldo negativo, cupom usado duas vezes). Rode e me mostre falhando.
+3. A correção fica no banco, que é quem enxerga as duas chamadas: restrição única; ou uma instrução só que confere e altera junto, olhando quantas linhas mudaram; ou transação que trava a linha. Nada de infraestrutura nova para isso (Redis, fila, trava em memória): se achar que o banco não resolve, me convença antes.
+4. Rode os testes de novo e me mostre passando. Travar o botão na tela é conforto para o usuário, não proteção.
+Me mostre o plano antes de mexer e cada migration antes de rodar. Se a restrição única esbarrar em registros duplicados que já existem, liste-os para mim e pare: não apague nada.
+```
+
+## PA17 · Webhook e pagamento que aguentam repetição
+<!-- quando: C06,C08 se webhook|pagamento|checkout|stripe|assinatura · engenharia -->
+**Quando usar:** o app recebe webhook de pagamento (Stripe, Mercado Pago, Asaas, Efí, Pagar.me) ou cobra, libera plano ou credita saldo. O gateway reenvia o mesmo evento, e o segundo envio não pode liberar o plano de novo.
+
+```text
+O gateway de pagamento reenvia webhook quando não recebe resposta a tempo, às vezes fora de ordem e às vezes em dobro. Quero ter certeza de que nada acontece duas vezes por causa disso.
+1. Monte uma tabela com cada webhook que o app recebe (arquivo e linha) e estas colunas: a assinatura é conferida com o corpo bruto antes de qualquer outra coisa? Um evento repetido é barrado por restrição única no id do evento? O app consulta o gateway para saber o estado atual, em vez de confiar na ordem de chegada? Ele responde 2xx rápido e deixa o trabalho pesado para depois?
+2. Faça a mesma conferência nas rotas que cobram, liberam plano, creditam saldo ou mandam e-mail de compra: um clique repetido cria a segunda cobrança?
+3. Corrija o que faltar. Nas chamadas que o app faz ao gateway, use a chave de idempotência dele, criada uma vez por operação e reaproveitada na nova tentativa. A chave nunca é e-mail, CPF ou outro dado da pessoa.
+4. Escreva testes que entregam o mesmo evento duas vezes, uma depois da outra e as duas juntas, e provam que o efeito (plano liberado, crédito, e-mail) aconteceu uma vez só.
+Não mexa em preço, plano nem regra de cobrança. Me mostre a tabela e o plano antes de alterar código.
+```
+
+## PA18 · Regra de negócio que o navegador decide
+<!-- quando: C07,C08 · engenharia -->
+**Quando usar:** o relatório marcou controle de acesso ou mass assignment, ou o app calcula preço, desconto, frete, limite de plano ou permissão na tela.
+
+```text
+Tudo o que roda no navegador o usuário consegue ler e mudar: pelo DevTools ou chamando a API direto. Quero achar o que o app decide no lado errado.
+1. Liste o que é calculado ou decidido só no front: preço, desconto, frete, total do carrinho, limite do plano, papel de admin, botão que aparece só para quem pode e validação de formulário. Para cada item, diga se o servidor confere de novo ou aceita o valor que chega do navegador.
+2. Para cada item que o servidor aceita, me mostre como alguém mudaria o resultado (o corpo da requisição alterado, a chamada feita direto na API).
+3. Leve a decisão para o servidor (rota de API, Server Action ou Edge Function): ele recalcula a partir do que está no banco e ignora o valor do cliente. A tela continua calculando, mas só para mostrar.
+4. Campos que o usuário não pode mudar (papel, plano, saldo, status de pagamento) só mudam pelo servidor: confira também o banco e as policies.
+5. Teste cada correção mandando o valor adulterado direto para a rota e provando que o servidor ignora.
+Primeiro me entregue a lista. Depois corrija um item por vez, com o meu OK em cada um.
+```
+
+## PA19 · Testes de integração nos fluxos que não podem quebrar
+<!-- quando: P04 · engenharia -->
+**Quando usar:** o app não tem testes (P04) ou você vai pedir à IA uma mudança grande. É a rede de segurança: avisa na hora quando algo quebrou, antes do cliente.
+
+```text
+Quero uma rede de segurança antes de pedir mudanças maiores: testes que passam pelas rotas de verdade e por um banco de teste, para eu saber na hora quando algo quebrou.
+1. Leia o check-report/RELATORIO.md e o código e escolha os 3 a 5 fluxos que mais doem se quebrarem (normalmente cadastro e login, pagamento, e o que mostra ou altera dado de cliente). Me diga quais escolheu e por quê.
+2. Para cada fluxo, monte uma tabela com duas colunas: "o que tem que acontecer" e "o que nunca pode acontecer" (por exemplo: cobrar duas vezes, outra conta ver o pedido, entrar sem confirmar o e-mail). Espere eu revisar: essa tabela é a especificação.
+3. Use a ferramenta de teste que o projeto já tem; se não houver, proponha uma e espere o meu OK. Os testes rodam contra um banco separado (Supabase local, container ou projeto de teste), nunca contra produção. Só o que é de fora (gateway, e-mail, APIs de terceiros) é simulado; o banco e a regra testada, nunca.
+4. Cada linha da tabela vira um teste. Inclua sempre um caso com duas chamadas simultâneas e um com a conta errada.
+5. Rode e me mostre o resultado. Se um teste falhar porque o código está errado, ele continua falhando e o problema vai para o check-report/CORRECOES.md; se o teste estiver errado, me pergunte antes de mudá-lo. Nunca apague nem desligue teste para a suíte ficar verde.
+No fim, me diga o comando que roda tudo e coloque esse comando no CI, se o projeto tiver.
+```
+
+## PA20 · Dividir um arquivo grande sem mudar o que o app faz
+<!-- quando: engenharia -->
+**Quando usar:** existe aquele arquivo que ninguém quer abrir, e cada mudança nele quebra outra coisa. Rode depois do PA19.
+
+```text
+O arquivo [CAMINHO DO ARQUIVO] cresceu demais e qualquer mudança nele quebra outra coisa. Quero dividi-lo sem mudar o que o app faz.
+1. Antes de mover qualquer linha, garanta que existe teste do comportamento atual desse arquivo. Se não houver, escreva testes que registram o que ele faz hoje, mesmo o que parecer errado (o PA19 ajuda nisso).
+2. Separe o conteúdo em três grupos: o que é tela e reação do usuário, o que é regra (cálculo, validação, decisão) e o que fala com o banco ou com serviço de fora. Aponte também o que está duplicado e o que depende de estado global.
+3. Proponha a nova divisão de arquivos no padrão que o projeto já usa, sem lib nova.
+4. Faça em passos pequenos: cada passo move um pedaço e termina com os testes passando. O que outros arquivos, o banco ou quem chama a API enxergam (nomes de rotas, props e colunas) continua igual.
+Bug que aparecer no caminho você anota numa lista e não corrige agora. Espere o meu OK no plano antes do primeiro passo.
+```
+
+## PA21 · Raio-x de engenharia, sem alterar nada
+<!-- quando: engenharia -->
+**Quando usar:** para saber por qual dos PA16 a PA20 começar. Só lê o código.
+
+```text
+Quero um raio-x de engenharia do app sem mudar nada: nesta tarefa você só lê o código e roda comandos que não alteram nada (nada de instalar, migrar ou gravar em banco).
+Responda com arquivo e linha:
+1. Testes: existe suíte? Ela chama as rotas de verdade ou testa funções soltas com tudo simulado? Usa um banco separado do de produção? Quais fluxos de dinheiro e de permissão estão sem teste?
+2. Decisão no navegador: preço, desconto, limite de plano ou permissão que o servidor não confere de novo.
+3. Corrida: pontos que leem, decidem e gravam um recurso limitado sem proteção no banco.
+4. Repetição: webhook sem conferência de assinatura ou sem barreira para evento repetido, e chamada ao gateway sem chave de idempotência.
+5. Arquivos que misturam tela, regra e banco, com o maior candidato a dividir.
+Grave em check-report/ENGENHARIA.md uma tabela por tema (achado, risco alto, médio ou baixo, arquivo e linha, correção sugerida), com os 5 piores no topo. O que não deu para olhar vai numa seção "Não verificado", com o motivo. Termine com a ordem em que rodar o PA16 a PA20 neste projeto.
 ```
 
 ---

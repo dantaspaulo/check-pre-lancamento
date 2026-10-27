@@ -1,4 +1,4 @@
-<!-- check-pre-lancamento v2.1.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · CPL-PSD-2026 -->
+<!-- check-pre-lancamento v2.2.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · CPL-PSD-2026 -->
 # Correções · AgendaFácil (exemplo fictício)
 
 > Plano de correção gerado pelo check-pre-lancamento em 2026-10-27 (nota de segurança 49/100, prontidão 60/100, veredito: NÃO LANCE AINDA).
@@ -184,4 +184,4 @@ Em index.html troque o title para "AgendaFácil · agenda online para clínicas"
 - [ ] Entregar ao humano: o que foi corrigido (por task), o que ficou pendente e o checklist manual.
 
 ---
-<sub>Plano gerado pela skill check-pre-lancamento v2.1.0 · por Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento</sub>
+<sub>Plano gerado pela skill check-pre-lancamento v2.2.0 · por Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento</sub>

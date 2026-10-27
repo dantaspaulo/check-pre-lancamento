@@ -13,7 +13,7 @@ import math
 import re
 import sys
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 # Windows com saída em pipe usa cp1252 e quebra nos símbolos (✔, ❌, →): força UTF-8 com substituição.
 for _s in (sys.stdout, sys.stderr):

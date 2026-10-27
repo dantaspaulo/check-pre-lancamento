@@ -6,7 +6,7 @@ compatibility: "Scripts opcionais em Python 3.8+ só com biblioteca padrão (git
 metadata:
   author: "Paulo Sérgio Dantas"
   repository: "https://github.com/dantaspaulo/check-pre-lancamento"
-  version: "2.1.0"
+  version: "2.2.0"
   fingerprint: "CPL-PSD-2026"
 ---
 <!-- check-pre-lancamento · Copyright (c) 2026 Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0 (LICENSE.txt) · CPL-PSD-2026 -->
@@ -60,7 +60,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/check_url.py" <URL> --out <RAIZ>/check-repo
   - coleta os sinais de prontidão;
   - roda `npm`/`pnpm`/`yarn`/`bun audit` (só produção, e separa o que é só de build e só de dev), `pip-audit`, `composer audit`, `osv-scanner`, `govulncheck` e `bundle-audit` quando existem.
   - Sem rede, use `--no-audit`. Com histórico gigante, `--no-git-history`, e registre em `limitacoes`.
-  - Comentário não dispara regra (código comentado não roda). O que o `.gitignore` ignora e as pastas fora do build (`docs/`, `examples/` na raiz) ficam fora das regras de código. Segredo continua sendo procurado em todas elas (no que o git ignora, com confiança baixa: não vai para o repositório, mas vaza se entrar no build). Para tirar outra pasta (cópias locais, sincronização, rascunhos), use `--ignorar pasta/` (repete ou separa por vírgula) ou um arquivo `.check-pre-lancamento-ignore` na raiz, no formato do `.gitignore`. `--varrer-tudo` desliga tudo isso. O que ficou de fora vem em `cobertura_do_scan` e em `avisos`, e vai para `cobertura` no `findings.json`.
+  - Comentário não dispara regra (código comentado não roda; em template de servidor, como PHP, Blade, ERB e HTML do Django, o `<!-- -->` não conta como comentário). As pastas que o `.gitignore` ignora e as pastas fora do build (`docs/`, `examples/` na raiz) ficam fora das regras de código. O `.gitignore` só vale num repositório git com arquivos versionados: num zip sem git, tudo o que veio está versionado e entra. Segredo continua sendo procurado em todas essas pastas (nas que o git ignora, com confiança baixa: não vão para o repositório, mas vazam se entrarem no build). Para tirar outra pasta (cópias locais, sincronização, rascunhos), use `--ignorar pasta/` (repete ou separa por vírgula) ou um arquivo `.check-pre-lancamento-ignore` na raiz, no formato do `.gitignore`. `--varrer-tudo` desliga tudo isso. O que ficou de fora vem em `cobertura_do_scan` e em `avisos`, e vai para `cobertura` no `findings.json`.
 - **`check_url.py`** faz só GETs normais no domínio do usuário. Ele olha:
   - headers, cookies, CORS, redirect HTTP→HTTPS e certificado;
   - arquivos expostos (`/.env`, `/.git`, actuator, logs);
@@ -212,4 +212,4 @@ No fim, rode o `scan.py` de novo, atualize os status no `findings.json`, regener
 | Mobile (Expo/RN/Flutter) e desktop (Electron/Tauri) | o app inteiro é cliente: chave no app é chave pública; `app.json` `extra`, `--dart-define`, AsyncStorage/SharedPreferences, `AndroidManifest.xml`, `Info.plist` |
 
 ---
-<sub>check-pre-lancamento v2.1.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0</sub>
+<sub>check-pre-lancamento v2.2.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0</sub>

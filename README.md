@@ -294,6 +294,7 @@ O relatório termina com os prompts que combinam com o que foi achado. Copie, co
 | **PA08** | escrever Termos de Uso e Política de Privacidade a partir do que o app coleta |
 | **PA09** a **PA12** | headers sem quebrar o site, dependências, backup testado, erro e queda com alerta |
 | **PA13** a **PA15** | checklist do dia do lançamento, conferir de novo comparando, explicar para quem não é técnico |
+| **PA16** a **PA21** | engenharia depois do lançamento: pedido duplicado, webhook repetido, regra que o navegador decide, testes de integração, dividir arquivo grande e um raio-x só de leitura |
 
 <br/>
 
@@ -361,7 +362,7 @@ Pode, inclusive comercialmente. O que a licença não deixa é vender ou republi
 Funciona. Use `python` ou `py -3` em vez de `python3`. No `npx skills`, se o link der problema, use `--copy`.
 
 **Apareceu achado de pasta que não vai para o ar (docs, cópias locais, sincronização)?**
-O scanner já deixa de fora das regras de código o que está no `.gitignore` e as pastas `docs/` e `examples/` da raiz, e comentário não conta como código. Para outra pasta, peça ao agente para ignorá-la (`--ignorar pasta/`) ou crie na raiz um `.check-pre-lancamento-ignore` no formato do `.gitignore`. Chave secreta continua sendo procurada nessas pastas, e o relatório diz o que ficou de fora.
+O scanner já deixa de fora das regras de código as pastas que o `.gitignore` ignora (num repositório git) e as pastas `docs/` e `examples/` da raiz, e comentário não conta como código. Num zip sem git, tudo o que veio entra, porque tudo estava versionado. Para outra pasta, peça ao agente para ignorá-la (`--ignorar pasta/`) ou crie na raiz um `.check-pre-lancamento-ignore` no formato do `.gitignore`. Chave secreta continua sendo procurada nessas pastas, e o relatório diz o que ficou de fora.
 
 **Meu app no Supabase começou a dar erro 42501 (permission denied) depois de 30/10/2026. E agora?**
 A partir de 30/10/2026, tabela nova no schema `public` nasce sem GRANT (em projeto criado depois de 30/05/2026, já era assim). Não resolva com GRANT em massa (`on all tables` ou `on all functions`): isso reabre as tabelas privadas e as funções internas. Dê GRANT tabela por tabela, só ao papel que precisa. Os prompts **PA04** e **PA05** fazem isso com você.

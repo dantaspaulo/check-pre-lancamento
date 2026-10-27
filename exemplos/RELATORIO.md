@@ -1,4 +1,4 @@
-<!-- check-pre-lancamento v2.1.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · CPL-PSD-2026 -->
+<!-- check-pre-lancamento v2.2.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · CPL-PSD-2026 -->
 # Check pré-lançamento · AgendaFácil (exemplo fictício)
 
 **Data:** 2026-10-27  
@@ -388,6 +388,8 @@ Com o relatório novo, me mostre:
 Não marque nada como OK sem evidência.
 ```
 
+**Depois do lançamento (engenharia):** PA16 Duas requisições ao mesmo tempo · PA17 Webhook e pagamento que aguentam repetição · PA18 Regra de negócio que o navegador decide · PA19 Testes de integração nos fluxos que não podem quebrar · PA20 Dividir um arquivo grande sem mudar o que o app faz · PA21 Raio-x de engenharia, sem alterar nada. Estão no [PROMPTS.md](https://github.com/dantaspaulo/check-pre-lancamento/blob/main/PROMPTS.md), com a ordem sugerida.
+
 
 ## Cobertura desta análise
 
@@ -399,5 +401,5 @@ O que foi olhado e o que ficou de fora. O que não foi olhado não está aprovad
 - Fora do escopo: painel da Netlify e app mobile (não existe)
 
 ---
-Gerado pela skill **[check-pre-lancamento](https://github.com/dantaspaulo/check-pre-lancamento)** v2.1.0 · criada por **Paulo Sérgio Dantas** · [github.com/dantaspaulo](https://github.com/dantaspaulo)  
+Gerado pela skill **[check-pre-lancamento](https://github.com/dantaspaulo/check-pre-lancamento)** v2.2.0 · criada por **Paulo Sérgio Dantas** · [github.com/dantaspaulo](https://github.com/dantaspaulo)  
 Triagem automatizada + revisão de código por IA. Ajuda muito, mas não substitui pentest profissional em app que lida com dinheiro, saúde ou dado sensível em escala.

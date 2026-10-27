@@ -2,6 +2,27 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versões seguem [SemVer](https://semver.org/lang/pt-BR/).
 
+## [2.2.0] · 2026-10-27
+
+### Novo
+- **Seis prompts de engenharia para depois do lançamento (PA16 a PA21):** duas requisições ao mesmo tempo (pedido duplicado, cupom usado duas vezes), webhook e pagamento que aguentam repetição, regra de negócio que o navegador decide, testes de integração nos fluxos que não podem quebrar, dividir arquivo grande sem mudar comportamento e um raio-x de engenharia só de leitura. Os temas vieram de uma sugestão de usuário, a partir de um material de @manodeyvin; os textos foram escritos para a skill.
+- O relatório traz o PA17 por extenso quando o C06 ou o C08 ficam abertos e o assunto é webhook ou pagamento, o PA18 com C07 ou C08 abertos e o PA19 com P04 aberto. Os demais prompts de engenharia aparecem citados no fim, com link para a ordem sugerida.
+
+### Corrigido
+Uma revisão adversarial da 2.1.0 achou 15 problemas, todos reproduzidos e agora cobertos por teste. Três eram regressões: a 2.0.0 achava e a 2.1.0 deixou de achar.
+- **Regressões da 2.1.0:**
+  - policy, RLS e GRANT dentro de bloco `DO $$ ... $$` (o jeito comum de criar policy idempotente) não eram lidos;
+  - `using(true)` e `with check(true)` sem espaço antes do parêntese passavam sem achado;
+  - um apóstrofo dentro de `$$...$$` ou um `\'` numa string `E'...'` juntava todos os comandos seguintes num só.
+- **Pasta do scan dentro de outro repositório que a ignora** (um zip extraído em `tmp/`): tudo virava "ignorado" e nenhuma regra rodava. O `.gitignore` agora só vale quando a raiz tem arquivo versionado e não é ignorada pelo repositório de cima.
+- **Zip sem git:** o arquivo que casa com o `.gitignore` está versionado (veio no zip), então continua nas regras de código e com a confiança normal. Arquivo versionado dentro de pasta ignorada também continua valendo, e o `.env` de pasta ignorada passa pela busca de segredo.
+- **Template de servidor:** em PHP, Blade, ERB, Razor e no HTML do Django, Jinja ou Thymeleaf, o `<!-- -->` não é mais tratado como comentário, porque o servidor executa o que está dentro dele.
+- **Regex literal do JavaScript** como `/\/*$/` não abre mais um comentário falso, e o leitor de comentários ficou linear (um caso de 16 mil linhas caiu de 25 s para menos de 1 s).
+- **C20:** pacote importado em `src/.../tools/`, servidor chamado no script `start` (como o `serve`) e o runtime do framework (Next, Nuxt, SvelteKit, Express…) voltam a contar como produção.
+- **P07:** o link para a política do Google, do Stripe e de outros terceiros (o aviso do reCAPTCHA, por exemplo) não conta mais como página legal do app.
+- **Funções:** `drop function` e uma sobrecarga nova voltam ao padrão do Postgres (EXECUTE para PUBLIC) em vez de herdar o REVOKE da função antiga.
+- **Outros:** `config.toml` salvo com CRLF (Windows); regras de função e view só valem com Supabase ou PostgREST (Rails, Prisma e cia. não expõem o banco); tabela temporária não conta como tabela do schema; GRANT em massa num schema não atinge as tabelas de outro; `revoke grant option for` não tira mais o privilégio; FIFO no lugar do arquivo de ignorar não trava o scan; o aviso de "apaga dados" não dispara mais no privilégio `truncate` de um REVOKE; e `stack` em lista não quebra o relatório.
+
 ## [2.1.0] · 2026-10-27
 
 Feita a partir do retorno de quem rodou a 2.0.0 num app React + Vite + Supabase + Cloudflare com uns 1.500 arquivos.
@@ -21,7 +42,7 @@ Feita a partir do retorno de quem rodou a 2.0.0 num app React + Vite + Supabase 
 - **`--ignorar PASTA`** (ou `--ignore`) e o arquivo `.check-pre-lancamento-ignore`, no formato do `.gitignore`. `--varrer-tudo` volta ao comportamento antigo.
 
 ### Mudou
-- **O scanner respeita o `.gitignore`** (pelo `git check-ignore`, ou lendo o arquivo quando a pasta não tem git) e deixa fora das regras de código as pastas `docs/` e `examples/` da raiz. Chave secreta continua sendo procurada em todas essas pastas (no que o git ignora, com confiança baixa: não vai para o repositório, mas vaza se entrar no build), e o que ficou de fora aparece em `cobertura_do_scan` e nos avisos. Uma pasta `docs/` com `index.html`, `CNAME` ou `_config.yml` é tratada como site publicado (GitHub Pages), não como documentação.
+- **O scanner respeita o `.gitignore`** (pelo `git check-ignore`) e deixa fora das regras de código as pastas `docs/` e `examples/` da raiz. Chave secreta continua sendo procurada em todas essas pastas (no que o git ignora, com confiança baixa: não vai para o repositório, mas vaza se entrar no build), e o que ficou de fora aparece em `cobertura_do_scan` e nos avisos. Uma pasta `docs/` com `index.html`, `CNAME` ou `_config.yml` é tratada como site publicado (GitHub Pages), não como documentação.
 - **Comentário não dispara regra:** o código é lido sem os comentários em JS/TS, Python, PHP, Ruby, SQL, HTML, Vue, Svelte e regras do Firebase. Os números de linha continuam os mesmos.
 - **Policies separadas por público:** `policy_publica_leitura`, `policy_publica_escrita`, `policy_qualquer_logado_leitura` e `policy_qualquer_logado_escrita` substituem `policy_permissiva` e `policy_qualquer_logado`. Leitura de tabela com nome de catálogo (CID, CBHPM, TUSS, estados, categorias) cai para confiança baixa; com nome de dado de usuário, sobe.
 - **C20 separa produção, build e dev:** alta/crítica em pacote que só a config do build, os scripts e os testes usam vira `vulnerabilidades_so_no_build` (média), e o que existe só em `devDependencies` vira `vulnerabilidades_so_dev` (baixa). Antes, um `vite` em `dependencies` derrubava o C20 para FALHA.

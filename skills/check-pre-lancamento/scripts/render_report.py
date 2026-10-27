@@ -73,7 +73,7 @@ CUIDADOS = (
      "Em funções, o Postgres dá EXECUTE a PUBLIC por padrão: revogar só do anon não fecha."),
     (re.compile(r"disable\s+row\s+level\s+security", re.I),
      "Desligar a RLS deixa a tabela inteira aberta para quem tem GRANT nela. Isso nunca é a correção."),
-    (re.compile(r"\bdrop\s+(?:table|schema|database)\b|\btruncate\s+(?:table\s+)?[\w\"]", re.I),
+    (re.compile(r"(?:^|;|\bthen\b)[ \t]*(?:drop\s+(?:table|schema|database)\b|truncate\b(?:\s+table)?\s+(?!on\b)[\w\"])", re.I | re.M),
      "Este comando apaga dados. Só com backup conferido e o OK explícito do humano."),
 )
 
@@ -102,22 +102,25 @@ def carregar_prompts():
 
 
 def escolher_prompts(lib, every, meta, maximo=5):
-    """Os prompts que combinam com o que ficou aberto (ou os pedidos em findings.json → "prompts")."""
+    """(prompts por extenso, prompts de engenharia só citados) que combinam com o que ficou aberto.
+    Com "prompts" no findings.json, vale a escolha de quem escreveu."""
     por_id = {p["id"]: p for p in lib}
+    engenharia = [p for p in lib if "engenharia" in p["quando"]]
     pedidos = meta.get("prompts") or []
     pedidos = [str(x).strip().upper() for x in (re.split(r"[,\s]+", pedidos) if isinstance(pedidos, str) else pedidos) if str(x).strip()]
     if pedidos:
-        return [por_id[i] for i in pedidos if i in por_id]
+        sel = [por_id[i] for i in pedidos if i in por_id]
+        return sel, [p for p in engenharia if p not in sel]
     abertos = {c["id"] for c in every if c["status"] in ("FALHA", "ATENCAO")}
     if not abertos:
-        return [p for p in lib if p["quando"].startswith("sempre")][:2]
+        return [p for p in lib if p["quando"].startswith("sempre")][:2], engenharia
     critico = any(c["status"] == "FALHA" and c["severidade"] == "CRITICO" for c in every)
     contexto = " ".join([meta.get("stack") or ""] + [(c.get("resumo") or "") + " " + (c.get("correcao") or "") for c in every]).lower()
     escolhidos = []
     for p in lib:
         q = p["quando"]
-        se = re.search(r"\bse (\w+)", q)
-        if se and se.group(1) not in contexto:
+        se = re.search(r"\bse ([\w|]+)", q)
+        if se and not any(w and w in contexto for w in se.group(1).split("|")):
             continue
         ids = {i.upper() for i in re.findall(r"\b[cp]\d{2}\b", q)}
         if (q.startswith("critico") and critico) or (q.startswith("abertos") and p["id"] != "PA14") or ids & abertos:
@@ -125,7 +128,7 @@ def escolher_prompts(lib, every, meta, maximo=5):
     final = escolhidos[:maximo - 1]
     if "PA14" in por_id:
         final.append(por_id["PA14"])
-    return final
+    return final, [p for p in engenharia if p not in final]
 
 
 def clean(x):
@@ -178,7 +181,10 @@ def load(path):
             errors.append("faltando itens de prontidão: " + ", ".join(miss_p) + " (com 'prontidao' no JSON, os 10 entram; use NA se não se aplica)")
     if errors:
         sys.exit("findings.json inválido:\n  - " + "\n  - ".join(errors))
-    return clean({k: v for k, v in data.items() if k not in ("checks", "prontidao")}), checks, pront
+    meta = {k: v for k, v in data.items() if k not in ("checks", "prontidao")}
+    if isinstance(meta.get("stack"), (list, tuple)):
+        meta["stack"] = ", ".join(str(x) for x in meta["stack"])
+    return clean(meta), checks, pront
 
 
 def score(checks):
@@ -390,8 +396,8 @@ def render(meta, checks, pront, outdir):
         L.append(f"{step}. Rode o check de novo para confirmar que tudo virou ✅.")
     else:
         L.append("1. Mantenha Dependabot/Renovate ativo e rode este check a cada release grande.")
-    sel = escolher_prompts(carregar_prompts(), every, meta)
-    if sel:
+    sel, depois = escolher_prompts(carregar_prompts(), every, meta)
+    if sel or depois:
         L.append("\n## Prompts prontos para o próximo passo\n")
         L.append("Copie e cole no seu agente, aberto na pasta do projeto. No claude.ai ou em outro chat, anexe antes este relatório e o "
                  f"`CORRECOES.md`. A lista completa está em [PROMPTS.md]({AUTORIA['repositorio']}/blob/main/PROMPTS.md).\n")
@@ -401,6 +407,9 @@ def render(meta, checks, pront, outdir):
             if p["uso"]:
                 L.append(f"**Quando usar:** {p['uso']}\n")
             L.append(fence(p["texto"].replace("check-report/", pasta), "text") + "\n")
+        if depois:
+            L.append("**Depois do lançamento (engenharia):** " + " · ".join(f"{p['id']} {p['titulo']}" for p in depois)
+                     + f". Estão no [PROMPTS.md]({AUTORIA['repositorio']}/blob/main/PROMPTS.md), com a ordem sugerida.\n")
     cob = meta.get("cobertura") or []
     if cob:
         L.append("\n## Cobertura desta análise\n")

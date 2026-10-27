@@ -10,6 +10,7 @@ geradas aleatoriamente aqui, então nenhum valor com cara de segredo fica versio
 import http.server
 import json
 import random
+import re
 import shutil
 import socketserver
 import string
@@ -398,16 +399,18 @@ def teste_comentarios():
 
 
 def sc_padroes_invalidos_quebram(tmp):
-    base = tmp / "gitignore_estranho"
-    write(base, {".gitignore": "[[:alpha:]\\\n[z-a]\n**/\\\nsite/\n", "docs/index.html": "<script>eval(x)</script>",
-                 "docs/app.js": "eval(y)\n", "src/a.js": "eval(z)\n"})
+    base = tmp / "ignorar_estranho"
+    write(base, {".check-pre-lancamento-ignore": "[[:alpha:]\\\n[z-a]\n**/\\\nsite/\n", "docs/index.html": "<script>eval(x)</script>",
+                 "docs/app.js": "eval(y)\n", "src/a.js": "eval(z)\n", "site/b.js": "eval(w)\n"})
     res = scan(base)
     got = {a.get("arquivo") for a in achados(res, "eval")}
-    return bool(res.get("erros_do_scanner")) or "src/a.js" not in got or "docs/app.js" not in got  # docs/ com index.html é site
+    # padrão inválido é pulado, o válido (site/) vale, e docs/ com index.html é site publicado, não documentação
+    return bool(res.get("erros_do_scanner")) or "src/a.js" not in got or "docs/app.js" not in got or "site/b.js" in got
 
 
 def teste_zonas(tmp):
-    """.gitignore, pastas fora do build e --ignorar ficam fora das regras de código; segredo segue sendo procurado."""
+    """Pastas do .gitignore (só com git e arquivo versionado), fora do build e --ignorar ficam fora das regras de código, e o
+    segredo segue sendo procurado. Sem git, tudo o que veio entra: num zip, tudo está versionado."""
     print("· pastas fora das regras de código (.gitignore, docs/, --ignorar)")
     base = tmp / "zonas"
     write(base, {
@@ -422,41 +425,46 @@ def teste_zonas(tmp):
         "rascunhos/y.js": "eval(q)\n",
         "legado/z.js": "eval(w)\n",
     })
-    proibidas = ("C14:eval", "C14:inner_html", "P01:localhost_no_cliente")
     for modo in ("sem git", "com git"):
         if modo == "com git":
             if not shutil.which("git"):
                 print("  (sem git na máquina: pulei o modo com git)")
                 continue
-            subprocess.run(["git", "init", "-q", str(base)], check=True)
-        out = base / "scan.json"
+            _git_commit(base)
+        out = base.parent / f"zonas-{modo.replace(' ', '-')}.json"
         r = subprocess.run([sys.executable, str(SCRIPTS / "scan.py"), str(base), "--no-audit", "--no-git-history", "--quiet",
                             "--ignorar", "legado/", "--out", str(out)], capture_output=True, text=True)
         if r.returncode != 0:
             FALHAS.append(f"[zonas {modo}] scan falhou: {r.stderr[-400:]}")
             continue
         res = json.loads(out.read_text(encoding="utf-8"))
-        got = regras(res)
-        for p in proibidas:
-            if p in got:
-                FALHAS.append(f"[zonas {modo}] {p} veio de pasta fora das regras: " +
-                              ", ".join(a.get("arquivo", "") for a in achados(res, p.split(":")[1])))
+        vistos = {(rg, a.get("arquivo", "")) for rg in ("eval", "inner_html", "localhost_no_cliente") for a in achados(res, rg)}
+        for rg, arq in vistos:
+            if arq.startswith(("docs/", "rascunhos/", "legado/")):
+                FALHAS.append(f"[zonas {modo}] {rg} veio de {arq}, que está fora das regras de código")
+        locais = sorted({arq for _rg, arq in vistos if arq.startswith(("arquivos-locais/", ".ds-sync/"))})
+        if modo == "sem git" and len(locais) != 2:
+            FALHAS.append(f"[zonas sem git] sem git, as pastas do .gitignore deviam continuar nas regras: {locais}")
+        if modo == "com git" and locais:
+            FALHAS.append(f"[zonas com git] pasta ignorada pelo git entrou nas regras: {locais}")
         if not any(a.get("arquivo") == "docs/chaves.md" for a in achados(res, "openai_key")):
             FALHAS.append(f"[zonas {modo}] segredo em docs/ deixou de ser procurado")
-        locais = [a for a in achados(res, "anthropic_key") if a.get("arquivo", "").startswith("arquivos-locais/")]
-        if not locais or locais[0]["confianca"] != "baixa":
-            FALHAS.append(f"[zonas {modo}] segredo em arquivo do .gitignore devia aparecer com confiança baixa")
+        chave = [a for a in achados(res, "anthropic_key") if a.get("arquivo", "").startswith("arquivos-locais/")]
+        if not chave or (chave[0]["confianca"] == "baixa") != (modo == "com git"):
+            FALHAS.append(f"[zonas {modo}] chave em arquivos-locais/: {[a['confianca'] for a in chave]} "
+                          "(com git, baixa; sem git, a confiança normal)")
         cob = res.get("cobertura_do_scan") or {}
-        if cob.get("ignorados_pelo_gitignore", {}).get("arquivos") != 2 or cob.get("fora_do_build", {}).get("arquivos") != 2 or \
+        if cob.get("ignorados_pelo_gitignore", {}).get("arquivos") != (2 if modo == "com git" else 0) or \
+                cob.get("fora_do_build", {}).get("arquivos") != 2 or \
                 sorted(cob.get("ignorados_a_pedido", {}).get("padroes", [])) != ["legado/", "rascunhos/"]:
             FALHAS.append(f"[zonas {modo}] cobertura errada: {json.dumps(cob, ensure_ascii=False)[:400]}")
-        if modo == "com git" and "git check-ignore" not in (cob.get("gitignore") or ""):
-            FALHAS.append("[zonas com git] não usou o git check-ignore")
+        if ("git check-ignore" in (cob.get("gitignore") or "")) != (modo == "com git"):
+            FALHAS.append(f"[zonas {modo}] método do .gitignore errado: {cob.get('gitignore')}")
         if not any("Fora das regras de código" in a for a in res.get("avisos", [])):
             FALHAS.append(f"[zonas {modo}] faltou o aviso de cobertura")
     if sc_padroes_invalidos_quebram(tmp):
-        FALHAS.append("[zonas] padrão inválido no .gitignore derrubou o scan")
-    out = base / "tudo.json"
+        FALHAS.append("[zonas] padrão inválido no arquivo de ignorar derrubou o scan (ou o válido não valeu)")
+    out = base.parent / "zonas-tudo.json"
     subprocess.run([sys.executable, str(SCRIPTS / "scan.py"), str(base), "--no-audit", "--no-git-history", "--quiet", "--varrer-tudo",
                     "--out", str(out)], capture_output=True, text=True)
     if "C14:eval" not in regras(json.loads(out.read_text(encoding="utf-8"))):
@@ -617,6 +625,7 @@ def teste_relatorio_prompts(tmp):
     rel = (tmp / "rel" / "RELATORIO.md").read_text(encoding="utf-8")
     cor = (tmp / "rel" / "CORRECOES.md").read_text(encoding="utf-8")
     for txt, onde in (("## Prompts prontos para o próximo passo", rel), ("### PA04", rel), ("### PA14", rel),
+                      ("Depois do lançamento (engenharia):** PA16", rel),
                       ("fechadas de propósito, voltam a abrir", cor), ("Revogação em massa", cor), ("Nunca devolva permissão em massa", cor)):
         if txt not in onde:
             FALHAS.append(f"[relatorio] faltou: {txt}")
@@ -625,6 +634,14 @@ def teste_relatorio_prompts(tmp):
     rel2 = (tmp / "rel2" / "RELATORIO.md").read_text(encoding="utf-8")
     if "### PA08" not in rel2 or "### PA04" in rel2:
         FALHAS.append("[relatorio] o campo 'prompts' do findings.json não foi respeitado")
+    base[5] = {"id": "C06", "status": "ATENCAO", "severidade": "ALTO", "resumo": "webhook do Stripe sem conferir a assinatura",
+               "risco": "x", "correcao": "x", "prompt": "x"}
+    base[3] = {"id": "C04", "status": "OK", "resumo": "ok"}
+    fj.write_text(json.dumps({"projeto": "x", "stack": "Next.js", "checks": base}), encoding="utf-8")
+    subprocess.run([sys.executable, str(SCRIPTS / "render_report.py"), str(fj), "--out", str(tmp / "rel3")], capture_output=True, text=True)
+    rel3 = (tmp / "rel3" / "RELATORIO.md").read_text(encoding="utf-8")
+    if "### PA17" not in rel3 or "PA17 Webhook" in rel3.split("### PA17", 1)[0]:
+        FALHAS.append("[relatorio] C06 aberto com webhook não trouxe o PA17 por extenso")
     import render_report as rr
     lib = rr.carregar_prompts()
     original = rr.SKILL_DIR
@@ -633,12 +650,204 @@ def teste_relatorio_prompts(tmp):
     (crlf / "prompts-pos-analise.md").write_bytes((original / "references" / "prompts-pos-analise.md").read_bytes().replace(b"\n", b"\r\n"))
     rr.SKILL_DIR = crlf.parent
     try:
-        if len(rr.carregar_prompts()) != 15:
+        if len(rr.carregar_prompts()) != 21:
             FALHAS.append("[relatorio] biblioteca de prompts com CRLF (Windows) não foi lida")
     finally:
         rr.SKILL_DIR = original
-    if [p["id"] for p in lib] != [f"PA{i:02d}" for i in range(1, 16)] or not all(p["texto"] for p in lib):
+    if [p["id"] for p in lib] != [f"PA{i:02d}" for i in range(1, 22)] or not all(p["texto"] for p in lib):
         FALHAS.append("[relatorio] biblioteca de prompts incompleta: " + ", ".join(p["id"] for p in lib))
+
+
+def _git_commit(base):
+    subprocess.run(["git", "init", "-q", str(base)], check=True)
+    subprocess.run(["git", "-C", str(base), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(base), "-c", "user.email=teste@exemplo.com", "-c", "user.name=teste", "commit", "-qm", "x"],
+                   check=True, capture_output=True)
+
+
+def teste_revisao_210(tmp):
+    """Regressões da revisão adversarial da 2.1.0 (27/10/2026): os 15 achados, cada um com o caso que o reproduziu."""
+    print("· regressões da revisão da 2.1.0")
+    import argparse
+    import os
+    import time
+    import render_report as rr
+    import scan as sc
+    supa = json.dumps({"dependencies": {"react": "18.3.1", "vite": "5.4.0", "@supabase/supabase-js": "2.45.0"}})
+    tem_git = bool(shutil.which("git"))
+    # 1) a pasta do scan dentro de outro repositório que a ignora continua sendo varrida
+    if tem_git:
+        pai = tmp / "r1_pai"
+        write(pai, {".gitignore": "importados/\n", "README.md": "x\n"})
+        _git_commit(pai)
+        app = pai / "importados" / "app"
+        write(app, {"package.json": supa, "src/App.tsx": "export const f = (h) => eval(h)\n",
+                    "supabase/migrations/1.sql": "create table public.profiles (id uuid);\n"
+                                                 "create policy \"tudo\" on public.profiles for all using (true);\n"})
+        got = regras(scan(app))
+        for e in ("C14:eval", "C04:tabela_sem_rls", "C04:policy_publica_escrita"):
+            if e not in got:
+                FALHAS.append(f"[rev210 1] pasta dentro de repositório que a ignora perdeu {e}")
+    # 2, 3, 4) DO $$, using(true) sem espaço, dollar quote com apóstrofo e E-string
+    base = tmp / "r2"
+    write(base, {"package.json": supa, "supabase/migrations/1.sql": (
+        "create table public.pedidos (id uuid);\nalter table public.pedidos enable row level security;\n"
+        "DO $$ BEGIN\n  CREATE POLICY \"todos\" ON public.pedidos FOR ALL TO anon USING (true) WITH CHECK (true);\n"
+        "EXCEPTION WHEN duplicate_object THEN NULL; END $$;\n"
+        "do $$ begin alter table public.pedidos disable row level security; end $$;\n"
+        "create table public.mensagens (id uuid);\nalter table public.mensagens enable row level security;\n"
+        "create policy \"a\" on public.mensagens for select using(true);\n"
+        "create policy \"b\" on public.mensagens for update to authenticated using(auth.uid() is not null);\n"
+        "insert into public.mensagens values ($$What's new?$$);\n"
+        "select E'it\\'s';\n"
+        "create table public.perfis (id uuid);\n"
+        "grant insert, update, delete on public.perfis to anon;\n")})
+    res = scan(base)
+    got = regras(res)
+    for e in ("C04:policy_publica_escrita", "C04:rls_desativado", "C04:policy_publica_leitura", "C04:policy_qualquer_logado_escrita",
+              "C04:tabela_sem_rls", "C04:anon_com_escrita"):
+        if e not in got:
+            FALHAS.append(f"[rev210 2-4] faltou {e}")
+    if "C04:permissoes_do_banco_nao_verificadas" in got:
+        FALHAS.append("[rev210 4] a string com apóstrofo engoliu os GRANTs seguintes")
+    linhas = {(a["regra"], a.get("linha")) for a in achados(res, "policy_publica_escrita") + achados(res, "rls_desativado")}
+    if ("policy_publica_escrita", 4) not in linhas or ("rls_desativado", 6) not in linhas:
+        FALHAS.append(f"[rev210 2] linha errada dentro do bloco DO: {sorted(linhas)}")
+    # 5) zip sem git: o que casa com o .gitignore veio no zip, então está versionado e entra nas regras
+    base = tmp / "r5"
+    write(base, {"package.json": supa, ".gitignore": "src/config.ts\n",
+                 "src/config.ts": f"export const k = '{OPENAI}'\nexport const h = (el, x) => {{ el.innerHTML = x }}\n",
+                 "src/main.ts": "import { k } from './config'\n"})
+    res = scan(base)
+    oa = [a for a in achados(res, "openai_key") if a.get("arquivo") == "src/config.ts"]
+    if not oa or oa[0]["confianca"] != "alta" or "ignorad" in oa[0]["nota"]:
+        FALHAS.append("[rev210 5] sem git, arquivo do .gitignore foi tratado como fora do repositório")
+    if "C14:inner_html" not in regras(res):
+        FALHAS.append("[rev210 5] sem git, arquivo do .gitignore saiu das regras de código")
+    if tem_git:  # 5b) .env dentro de pasta ignorada também passa pela busca de segredo
+        base = tmp / "r5b"
+        write(base, {"package.json": supa, ".gitignore": "deploy/\n", "src/a.ts": "export const a = 1\n"})
+        _git_commit(base)
+        write(base, {"deploy/.env.production": f"OPENAI_API_KEY={OPENAI}\n"})
+        hit = [a for a in achados(scan(base), "openai_key") if a.get("arquivo") == "deploy/.env.production"]
+        if not hit or hit[0]["confianca"] != "baixa":
+            FALHAS.append("[rev210 5b] .env em pasta ignorada não passou pela busca de segredo (ou a confiança não é baixa)")
+    # 6) <!-- --> em template de servidor executa: não é comentário
+    base = tmp / "r6"
+    write(base, {"composer.json": json.dumps({"require": {"laravel/framework": "^11.0"}}), "Gemfile": "gem 'rails'\n",
+                 "resources/views/post.blade.php": "<!-- {!! $post->body !!} -->\n",
+                 "app/views/posts/show.html.erb": "<!-- <%= raw(@post.body) %> -->\n"})
+    got = regras(scan(base))
+    for e in ("C14:blade_sem_escape", "C14:rails_html_safe"):
+        if e not in got:
+            FALHAS.append(f"[rev210 6] template de servidor dentro de <!-- --> perdeu {e}")
+    # 7) regex literal com '/*' não vira comentário, e o lexer é linear
+    base = tmp / "r7"
+    write(base, {"package.json": supa, "src/util.ts": "export const limpa = (u) => u.replace(/\\/*$/, '')\n"
+                                                     "export const r = (el, h) => { el.innerHTML = h; return eval(h) }\n/** fim */\n"})
+    got = regras(scan(base))
+    if "C14:eval" not in got or "C14:inner_html" not in got:
+        FALHAS.append("[rev210 7] regex literal com /* apagou o código seguinte")
+    grande = "const a = u.replace(/\\/*$/, '');\n" * 16000
+    t0 = time.time()
+    sc.tirar_comentarios(grande, ".js")
+    if time.time() - t0 > 3:
+        FALHAS.append(f"[rev210 7] lexer lento: {time.time() - t0:.1f}s em 16 mil linhas")
+    # 8) tools/ dentro do app, script start e runtime de framework são produção
+    base = tmp / "r8"
+    write(base, {"package.json": json.dumps({"dependencies": {"cheerio": "1.0.0", "serve": "14.0.0", "nuxt": "3.0.0"},
+                                             "scripts": {"start": "serve -s out", "build": "nuxt build"}}),
+                 "src/lib/ai/tools/web.ts": "import * as c from 'cheerio'\nexport const x = c\n",
+                 "nuxt.config.ts": "import { defineNuxtConfig } from 'nuxt/config'\nexport default defineNuxtConfig({})\n"})
+    s = sc.Scanner(base, argparse.Namespace(no_audit=True, no_git_history=True, ignorar=None, varrer_tudo=False))
+    s.collect()
+    s.load_deps()
+    for pkg in ("cheerio", "serve", "nuxt"):
+        if s.uso_da_dependencia(pkg) != "producao":
+            FALHAS.append(f"[rev210 8] {pkg} devia ser produção, saiu {s.uso_da_dependencia(pkg)}")
+    # 9) o aviso do reCAPTCHA linka a política do Google, não a do app
+    base = tmp / "r9"
+    write(base, {"package.json": supa, "src/pages/Cadastro.tsx": (
+        "export default () => { supabase.auth.signUp({ email, password }); return <p>Protegido pelo reCAPTCHA: "
+        "<a href=\"https://policies.google.com/privacy\">Privacidade</a> e <a href=\"https://policies.google.com/terms\">Termos</a> "
+        "· <a href=\"/termos\">Nossos termos</a></p> }\n")})
+    if "P07:link_legal_sem_pagina" not in regras(scan(base)):
+        FALHAS.append("[rev210 9] link do Google contou como página legal do app")
+    # 10) drop function e sobrecarga nascem com EXECUTE para PUBLIC
+    base = tmp / "r10"
+    write(base, {"package.json": supa, "supabase/migrations/1.sql": (
+        "create function public.excluir_conta() returns void language sql security definer set search_path = '' as $$ delete from auth.users $$;\n"
+        "revoke execute on function public.excluir_conta() from public, anon, authenticated;\n"
+        "drop function public.excluir_conta();\n"
+        "create function public.excluir_conta() returns void language sql security definer set search_path = '' as $$ delete from auth.users $$;\n"
+        "create function public.apagar_tudo(a int) returns void language sql security definer set search_path = '' as $$ select 1 $$;\n"
+        "revoke execute on function public.apagar_tudo(int) from public, anon, authenticated;\n"
+        "create function public.apagar_tudo(a int, b int) returns void language sql security definer set search_path = '' as $$ select 1 $$;\n")})
+    fun = {a.get("linha"): a["confianca"] for a in achados(scan(base), "funcao_security_definer_exposta")}
+    if fun != {4: "alta", 7: "alta"}:
+        FALHAS.append(f"[rev210 10] drop function ou sobrecarga herdou o revoke da antiga: {fun}")
+    # 11) config.toml salvo com CRLF (Windows)
+    base = tmp / "r11"
+    write(base, {"package.json": supa, "supabase/migrations/1.sql": "create table api.vitrine (id int);\n"
+                                                                    "create policy \"v\" on api.vitrine for select using (true);\n"})
+    (base / "supabase" / "config.toml").write_bytes(b"[api]\r\nschemas = [\"public\", \"api\"]\r\nauto_expose_new_tables = true\r\n\r\n"
+                                                    b"[db]\r\nport = 54322\r\n")
+    got = regras(scan(base))
+    for e in ("C04:auto_expose_ligado", "C04:tabela_sem_rls", "C04:policy_publica_leitura"):
+        if e not in got:
+            FALHAS.append(f"[rev210 11] config.toml com CRLF perdeu {e}")
+    # 12) sem Supabase, função e view não viram achado de API; tabela temporária não é tabela do schema
+    base = tmp / "r12"
+    write(base, {"Gemfile": "gem 'rails'\n", "db/structure.sql": (
+        "create function public.f() returns int language sql security definer as $$ select 1 $$;\ncreate view public.v as select 1;\n")})
+    got = regras(scan(base))
+    for p in ("C04:funcao_security_definer_exposta", "C04:view_ignora_rls", "C04:security_definer_sem_search_path"):
+        if p in got:
+            FALHAS.append(f"[rev210 12] {p} num projeto sem Supabase")
+    base = tmp / "r12b"
+    write(base, {"package.json": supa, "supabase/migrations/1.sql": "create temp table tmp_x (id int);\ncreate temporary table tmp_y (id int);\n"})
+    if "C04:tabela_sem_rls" in regras(scan(base)):
+        FALHAS.append("[rev210 12] tabela temporária virou tabela sem RLS")
+    # 13a) GRANT em massa num schema não atinge o public; 13b) revoke grant option for não tira o privilégio
+    base = tmp / "r13"
+    write(base, {"package.json": supa, "supabase/config.toml": "[api]\nschemas = [\"public\", \"api\"]\n",
+                 "src/a.ts": "export const p = () => supabase.from('perfis').select('id')\n",
+                 "supabase/migrations/1.sql": (
+                     "create table public.perfis (id uuid);\nalter table public.perfis enable row level security;\n"
+                     "create table api.vitrine (id int);\nalter table api.vitrine enable row level security;\n"
+                     "grant select, insert on all tables in schema api to anon;\n"
+                     "create table public.t (id uuid);\nalter table public.t enable row level security;\n"
+                     "grant insert on public.t to anon;\nrevoke grant option for insert on public.t from anon;\n")})
+    res = scan(base)
+    w = achados(res, "anon_com_escrita")
+    lista = re.search(r"tabela\(s\): (.+?)\. Hoje", w[0]["nota"]).group(1).split(", ") if w else []
+    if sorted(lista) != ["t", "vitrine"]:
+        FALHAS.append("[rev210 13] GRANT por schema ou revoke grant option errado: " + (w[0]["nota"][:160] if w else "—"))
+    if "P04:tabela_sem_grant_explicito" not in regras(res):
+        FALHAS.append("[rev210 13a] GRANT em outro schema escondeu a tabela do public sem GRANT")
+    # 14) FIFO no lugar do arquivo de ignorar e de um .gitignore não trava o scan
+    if hasattr(os, "mkfifo"):
+        base = tmp / "r14"
+        write(base, {"src/a.js": "export const a = 1\n"})
+        (base / "sub").mkdir()
+        os.mkfifo(base / ".check-pre-lancamento-ignore")
+        os.mkfifo(base / "sub" / ".gitignore")
+        try:
+            subprocess.run([sys.executable, str(SCRIPTS / "scan.py"), str(base), "--no-audit", "--no-git-history", "--quiet",
+                            "--out", str(tmp / "r14.json")], capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            FALHAS.append("[rev210 14] FIFO travou o scan")
+    # 15a) o privilégio truncate dentro de REVOKE não é "apagar dados"; 15b) stack em lista não quebra o relatório
+    if rr.cuidados("revoke insert, update, delete, truncate on table public.x from anon;"):
+        FALHAS.append("[rev210 15a] revoke com truncate ganhou o aviso de apagar dados")
+    if not rr.cuidados("truncate table public.x;"):
+        FALHAS.append("[rev210 15a] truncate de verdade ficou sem aviso")
+    checks = [{"id": f"C{i:02d}", "status": "OK", "resumo": "ok"} for i in range(1, 21)]
+    fj = tmp / "r15.json"
+    fj.write_text(json.dumps({"projeto": "x", "stack": ["vite", "supabase"], "checks": checks}), encoding="utf-8")
+    r = subprocess.run([sys.executable, str(SCRIPTS / "render_report.py"), str(fj), "--out", str(tmp / "r15")], capture_output=True, text=True)
+    if r.returncode != 0 or "vite, supabase" not in (tmp / "r15" / "RELATORIO.md").read_text(encoding="utf-8"):
+        FALHAS.append("[rev210 15b] stack em lista quebrou o relatório: " + r.stderr[-200:])
 
 
 def main():
@@ -663,6 +872,7 @@ def main():
         teste_banco(tmp)
         teste_auditoria(tmp)
         teste_relatorio_prompts(tmp)
+        teste_revisao_210(tmp)
     if FALHAS:
         print(f"\n✘ {len(FALHAS)} falha(s):")
         for f in FALHAS:
