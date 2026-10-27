@@ -18,7 +18,7 @@ jobs:
         python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Créditos de autoria e manifesto em dia
