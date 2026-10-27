@@ -1,6 +1,6 @@
 {
   "name": "check-pre-lancamento",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Check pré-lançamento de apps: 20 checagens de segurança + 10 de prontidão, com nota, veredito, relatório e correções prontas para o agente aplicar. Por Paulo Sérgio Dantas.",
   "author": {
     "name": "Paulo Sérgio Dantas",

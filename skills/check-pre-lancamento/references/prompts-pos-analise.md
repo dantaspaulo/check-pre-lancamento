@@ -227,7 +227,7 @@ Leia check-report/RELATORIO.md e me explique como se eu não fosse técnico: o q
 
 ## Engenharia: depois do lançamento
 
-Os prompts PA16 a PA21 vão além das 30 checagens. Eles tratam de defeitos que aparecem cedo em app feito rápido com IA: pedido duplicado, webhook processado duas vezes, regra que o navegador decide e mudança que quebra outra coisa sem ninguém ver. Os temas vieram de uma sugestão de usuário, a partir de um material de @manodeyvin; os textos foram escritos para esta skill.
+Os prompts PA16 a PA21 vão além das 30 checagens. Eles tratam de defeitos que aparecem cedo em app feito rápido com IA: pedido duplicado, webhook processado duas vezes, regra que o navegador decide e mudança que quebra outra coisa sem ninguém ver. Os temas vieram de uma sugestão de usuário.
 
 Antes de colar qualquer um deles:
 - trabalhe numa branch separada, se o projeto usa git;

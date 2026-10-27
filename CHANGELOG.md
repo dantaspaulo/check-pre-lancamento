@@ -2,10 +2,15 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versões seguem [SemVer](https://semver.org/lang/pt-BR/).
 
+## [2.2.1] · 2026-10-27
+
+### Mudou
+- Ajuste no texto de apresentação dos prompts de engenharia (PA16 a PA21).
+
 ## [2.2.0] · 2026-10-27
 
 ### Novo
-- **Seis prompts de engenharia para depois do lançamento (PA16 a PA21):** duas requisições ao mesmo tempo (pedido duplicado, cupom usado duas vezes), webhook e pagamento que aguentam repetição, regra de negócio que o navegador decide, testes de integração nos fluxos que não podem quebrar, dividir arquivo grande sem mudar comportamento e um raio-x de engenharia só de leitura. Os temas vieram de uma sugestão de usuário, a partir de um material de @manodeyvin; os textos foram escritos para a skill.
+- **Seis prompts de engenharia para depois do lançamento (PA16 a PA21):** duas requisições ao mesmo tempo (pedido duplicado, cupom usado duas vezes), webhook e pagamento que aguentam repetição, regra de negócio que o navegador decide, testes de integração nos fluxos que não podem quebrar, dividir arquivo grande sem mudar comportamento e um raio-x de engenharia só de leitura. Os temas vieram de uma sugestão de usuário.
 - O relatório traz o PA17 por extenso quando o C06 ou o C08 ficam abertos e o assunto é webhook ou pagamento, o PA18 com C07 ou C08 abertos e o PA19 com P04 aberto. Os demais prompts de engenharia aparecem citados no fim, com link para a ordem sugerida.
 
 ### Corrigido

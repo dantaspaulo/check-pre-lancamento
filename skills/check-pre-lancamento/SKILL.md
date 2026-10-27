@@ -6,7 +6,7 @@ compatibility: "Scripts opcionais em Python 3.8+ só com biblioteca padrão (git
 metadata:
   author: "Paulo Sérgio Dantas"
   repository: "https://github.com/dantaspaulo/check-pre-lancamento"
-  version: "2.2.0"
+  version: "2.2.1"
   fingerprint: "CPL-PSD-2026"
 ---
 <!-- check-pre-lancamento · Copyright (c) 2026 Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0 (LICENSE.txt) · CPL-PSD-2026 -->
@@ -212,4 +212,4 @@ No fim, rode o `scan.py` de novo, atualize os status no `findings.json`, regener
 | Mobile (Expo/RN/Flutter) e desktop (Electron/Tauri) | o app inteiro é cliente: chave no app é chave pública; `app.json` `extra`, `--dart-define`, AsyncStorage/SharedPreferences, `AndroidManifest.xml`, `Info.plist` |
 
 ---
-<sub>check-pre-lancamento v2.2.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0</sub>
+<sub>check-pre-lancamento v2.2.1 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0</sub>
