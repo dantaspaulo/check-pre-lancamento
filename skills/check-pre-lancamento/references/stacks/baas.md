@@ -17,11 +17,90 @@ Referência para o agente que audita apps em Supabase, Firebase, Convex, PocketB
 - Painel: Security Advisor; Authentication (provedores, rate limits, SMTP, senhas, CAPTCHA); Storage (policies e buckets); configurações da API (schemas expostos, Data API); API keys; Database (SSL e restrição de rede).
 
 **Sinais do scanner**
-- `tabela_sem_rls`, `rls_desativado`, `policy_permissiva`, `security_definer`, `view_sem_security_invoker`, `grant_para_anon` → C04 · `policy_usa_user_metadata`, `user_metadata_para_papel` → C07
+- C04, tabelas e policies: `tabela_sem_rls`, `rls_desativado`, `policy_publica_leitura`, `policy_publica_escrita`, `policy_qualquer_logado_leitura`, `policy_qualquer_logado_escrita` (o público sai do `to`; sem `to` vale para `public`, que inclui o visitante; leitura de tabela de catálogo cai para confiança baixa)
+- C04, permissões: `anon_com_escrita`, `grant_em_massa_tabelas`, `grant_execute_em_massa`, `privilegio_padrao_aberto`, `funcao_security_definer_exposta`, `security_definer_sem_search_path`, `view_ignora_rls`, `view_materializada_exposta`, `auto_expose_ligado`, `permissoes_do_banco_nao_verificadas` · P04: `tabela_sem_grant_explicito`
+- `policy_usa_user_metadata`, `user_metadata_para_papel` → C07
 - `service_role_jwt`, `supabase_secret_key`, `public_env_service_role`, `service_role_in_client` → C03 · `supabase_secret`, `supabase_pat` → C01
 - `edge_function_sem_jwt`, `getSession_no_servidor` → C06 · `senha_minima_curta` → C10 · `postgrest_filtro_string` → C13 · `bucket_publico`, `bucket_publico_sql` → C16
-- `select_estrela`, `select_estrela_sem_limite` → C17 · `supabase_smtp_padrao` → P06 · sinais `C04.rls_nao_verificavel_pelo_repo`, `C06.supabase_confirmacao_email_desligada`, `C12.supabase_captcha_config`
-- Limites: sem migrations no repo, o estado real só aparece no banco (queries do `checks.md`), no Security Advisor ou via MCP. `edge_function_sem_jwt` só vê `verify_jwt = false`, mas função com `verify_jwt = true` também pode estar aberta (ver C06). Tabela que segue com os grants padrão de `anon` e policy sem `to` não são sinalizadas.
+- `select_estrela`, `select_estrela_sem_limite` → C17 · `supabase_smtp_padrao` → P06 · sinais `C04.rls_nao_verificavel_pelo_repo`, `C04.politicas_abertas`, `C04.tabelas_com_escrita_do_anon_por_grant`, `C06.supabase_confirmacao_email_desligada`, `C12.supabase_captcha_config`
+- Limites: o scanner lê só o que está nas migrations, na ordem dos arquivos. Os GRANTs que o próprio Supabase deu, o que foi mudado pelo painel e funções criadas pelo SQL Editor só aparecem no banco: rode a "Consulta de permissões" abaixo. `edge_function_sem_jwt` só vê `verify_jwt = false`, mas função com `verify_jwt = true` também pode estar aberta (ver C06).
+
+**Permissões: a mudança de 30/10/2026**
+- Até 30/10/2026, toda tabela nova no `public` nascia com SELECT, INSERT, UPDATE e DELETE para `anon`, `authenticated` e `service_role`. A partir de 30/10, nos projetos que já existiam, a tabela nova nasce sem GRANT (nos projetos novos, desde 30/05/2026). Tabelas antigas mantêm o que tinham. Fonte: [changelog do Supabase](https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically).
+- Sem GRANT, a Data API responde erro 42501 antes de a RLS rodar. O texto de ajuda do erro sugere um GRANT. Antes de copiar, pergunte quem precisa daquela tabela; GRANT para `anon` abre para quem não fez login.
+- O `[api] auto_expose_new_tables = true` do `supabase/config.toml` mantém o jeito antigo no ambiente local e sai da CLI em 30/10/2026. Migração durável: GRANT explícito por tabela, na mesma migration da RLS e das policies.
+- Funções: o Postgres dá EXECUTE a `PUBLIC` em toda função nova, e o `anon` herda de `PUBLIC`. Revogar só do `anon` não fecha.
+
+**Consulta de permissões (só leitura)**
+
+Rode pelo MCP/conector do Supabase (só leitura), ou peça ao usuário para rodar no SQL Editor e colar o resultado. Salve o resultado em `check-report/permissoes-antes.md` antes de qualquer mudança: é o retrato para comparar e para voltar atrás.
+
+```sql
+-- 1) Tabelas e views do public: o que o visitante (anon) e qualquer conta logada (authenticated) podem fazer
+select c.relname as objeto,
+       case c.relkind when 'r' then 'tabela' when 'p' then 'tabela' when 'v' then 'view'
+                      when 'm' then 'view materializada' when 'f' then 'tabela externa' end as tipo,
+       c.relrowsecurity as rls_ligada,
+       coalesce((select string_agg(p, ', ') from unnest(array['select', 'insert', 'update', 'delete']) p
+                 where has_table_privilege('anon', c.oid, p)), '-') as anon_pode,
+       coalesce((select string_agg(p, ', ') from unnest(array['select', 'insert', 'update', 'delete']) p
+                 where has_table_privilege('authenticated', c.oid, p)), '-') as logado_pode,
+       case when c.relkind = 'v' then coalesce(array_to_string(c.reloptions, ',') ~ 'security_invoker=(true|on|1|yes)', false) end
+         as view_com_security_invoker
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
+order by rls_ligada, objeto;
+
+-- 2) Funções do public que a Data API expõe em /rest/v1/rpc/<nome>
+select p.proname as funcao,
+       pg_get_function_identity_arguments(p.oid) as argumentos,
+       p.prosecdef as security_definer,
+       has_function_privilege('anon', p.oid, 'execute') as anon_executa,
+       has_function_privilege('authenticated', p.oid, 'execute') as logado_executa,
+       coalesce(array_to_string(p.proconfig, ', '), '') as configuracao
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.prokind = 'f'
+  and p.prorettype not in ('trigger'::regtype, 'event_trigger'::regtype)
+  and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')  -- tira as de extensão
+order by security_definer desc, anon_executa desc, funcao;
+
+-- 3) Privilégios padrão: o que todo objeto novo ganha ao nascer
+select pg_get_userbyid(d.defaclrole) as papel_que_cria,
+       coalesce(n.nspname, '(todos os schemas)') as schema,
+       case d.defaclobjtype when 'r' then 'tabelas' when 'S' then 'sequences' when 'f' then 'funções'
+                            when 'T' then 'tipos' when 'n' then 'schemas' end as objeto,
+       d.defaclacl as privilegios
+from pg_default_acl d
+left join pg_namespace n on n.oid = d.defaclnamespace
+where n.nspname = 'public' or d.defaclnamespace = 0
+order by 1, 3;
+```
+
+Como ler a consulta 3: `anon=arwd/postgres` quer dizer que toda tabela nova criada pelo `postgres` nasce com SELECT (`r`), INSERT (`a`), UPDATE (`w`) e DELETE (`d`) para o `anon`. `D` é TRUNCATE, `X` é EXECUTE e `U` é USAGE; um item que começa com `=` (sem nome antes) é `PUBLIC`.
+
+**Tirar acesso do `anon` sem quebrar o app**
+1. Salve o retrato das três consultas.
+2. Liste o que o app usa: `supabase.from('...')` e `supabase.rpc('...')` no código, marcando o que roda antes do login.
+3. Escreva a migration com o mínimo para cada papel e leia antes de aplicar:
+   ```sql
+   -- visitante sem login não escreve em nada (devolva tabela por tabela onde precisa: formulário de contato, lista de espera)
+   revoke insert, update, delete, truncate on all tables in schema public from anon;
+   -- leitura do visitante só nas tabelas públicas de verdade
+   revoke select on all tables in schema public from anon;
+   grant select on table public.especialidades to anon;
+   -- funções: fechar para o visitante e devolver só a que o front chama antes do login
+   revoke execute on all functions in schema public from public, anon;
+   grant execute on function public.validar_convite(text) to anon;
+   -- objeto novo nasce fechado
+   alter default privileges for role postgres in schema public revoke select, insert, update, delete on tables from anon;
+   alter default privileges for role postgres in schema public revoke execute on functions from public, anon;
+   ```
+4. **Não devolva em massa.** Depois de revogar, o reflexo é `grant execute on all functions in schema public to authenticated` "para garantir". Isso reabre as funções internas fechadas de propósito (as que apagam, mudam papel ou leem tudo). Conceda a `authenticated` só as funções que o app chama logado, uma a uma.
+5. Revogar de `public` atinge também o `authenticated`, que herda de `PUBLIC`. Pela consulta 2, confira o que `authenticated` (e o `service_role`, se as Edge Functions chamam funções) precisa continuar executando, e dê GRANT só nessas.
+6. Função usada dentro de policy (`is_admin()`, `is_member()`) precisa continuar executável por quem consulta a tabela, senão a policy quebra com "permission denied for function". Se ela só serve à policy, mova para um schema que a API não expõe (`private`) e dê `usage` no schema e `execute` na função a `authenticated`.
+7. Teste: visitante sem login, conta A e conta B. Rode de novo as consultas e compare com o retrato.
 
 **Correções por checagem**
 - **C03 Usar apenas Public Key no DB** — cliente só com `sb_publishable_` (ou o `anon` legado); `sb_secret_` e `service_role` só no servidor. As chaves legadas (`anon`/`service_role`, que são JWT) estão sendo descontinuadas até o fim de 2026: migre para as novas e desative as legadas no painel.

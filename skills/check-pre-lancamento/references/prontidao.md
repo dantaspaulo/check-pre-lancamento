@@ -80,7 +80,9 @@ Status como nas checagens: FALHA (viu o problema), ATENÇÃO (indício ou não v
 
 **O que é:** dá para recriar o banco e o ambiente a partir do repo, cada deploy é testado antes, e existe caminho de volta se a versão nova quebrar.
 
-**Sinais:** `banco_sem_migrations`, `sem_testes`, `sem_ci`; sinais `ci`, `arquivos_de_teste`, `migrations`.
+**Sinais:** `banco_sem_migrations`, `sem_testes`, `sem_ci`, `tabela_sem_grant_explicito`; sinais `ci`, `arquivos_de_teste`, `migrations`.
+
+**Supabase a partir de 30/10/2026:** tabela nova no schema `public` não ganha mais GRANT automático para `anon`, `authenticated` e `service_role` (as que já existiam mantêm o acesso). Migration que só cria a tabela e a RLS recria um banco que não funciona: num projeto novo (staging, branch, restauração depois de um desastre) o app recebe erro 42501 nas tabelas sem GRANT. O scanner aponta como `tabela_sem_grant_explicito` as tabelas que o app usa (`supabase.from('...')`) e que nenhuma migration libera. Correção: GRANT por tabela, só ao papel que precisa, na mesma migration da RLS e das policies (ver `references/stacks/baas.md`). Nunca GRANT em massa.
 
 **FALHA:** schema de produção alterado à mão sem migration (não reproduzível); deploy sem build verde.
 **ATENÇÃO:** sem testes automatizados nos fluxos críticos (cadastro, login, pagamento); sem CI; nenhum plano de rollback.
@@ -132,9 +134,11 @@ Status como nas checagens: FALHA (viu o problema), ATENÇÃO (indício ou não v
 
 **O que é:** quem coleta dado pessoal no Brasil precisa dizer o que coleta e por quê, ter base legal, permitir que o titular exerça os direitos dele e pedir consentimento quando a base legal é consentimento (cookie de marketing, por exemplo).
 
-**Sinais:** `sem_politica_de_privacidade`, `rastreador_sem_consentimento`, `sem_exclusao_de_conta`; sinais `paginas_legais`, `rastreadores`, `consentimento_em`.
+**Sinais:** `sem_politica_de_privacidade`, `link_legal_sem_pagina`, `rastreador_sem_consentimento`, `sem_exclusao_de_conta`; sinais `paginas_legais`, `links_sem_pagina`, `rastreadores`, `consentimento_em`.
 
-**FALHA:** app com cadastro e sem política de privacidade (LGPD art. 9º: informação clara sobre o tratamento); Meta Pixel ou Google Analytics/Ads carregando antes de qualquer consentimento em site que usa a base legal de consentimento.
+O scanner separa página que existe (arquivo de página, rota declarada ou link externo para o texto) de link para página. `link_legal_sem_pagina` é o cadastro que pede "li e aceito os Termos" com link para `/termos` sem nenhuma página ou rota com esse nome: o link dá 404 e o aceite não vale. Confirme abrindo o link no app: rota montada por constante (`path: ROTAS.TERMOS`) o scanner não enxerga.
+
+**FALHA:** app com cadastro e sem política de privacidade (LGPD art. 9º: informação clara sobre o tratamento); aceite de termos ou de política que leva a uma página inexistente (art. 9º, § 1º: o consentimento é nulo se a informação não foi apresentada antes, com transparência); Meta Pixel ou Google Analytics/Ads carregando antes de qualquer consentimento em site que usa a base legal de consentimento.
 **ATENÇÃO:** sem termos de uso; sem canal do titular (e-mail do encarregado/DPO); sem como excluir a conta e os dados (art. 18); dado sensível (saúde, biometria) sem base legal específica (art. 11); venda online sem a informação do direito de arrependimento de 7 dias (CDC art. 49).
 **OK:** política e termos acessíveis no rodapé e no cadastro, banner de cookies que bloqueia rastreador até o aceite (Consent Mode v2 no Google), canal do titular e exclusão de conta funcionando.
 

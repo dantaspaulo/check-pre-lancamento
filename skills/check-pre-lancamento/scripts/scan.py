@@ -6,7 +6,7 @@
 """check-pre-lancamento · scanner de triagem das 20 checagens + 10 de prontidão.
 
 Uso:
-    python3 scan.py [RAIZ] [--out ARQUIVO.json] [--no-git-history] [--no-audit] [--quiet]
+    python3 scan.py [RAIZ] [--out ARQUIVO.json] [--no-git-history] [--no-audit] [--ignorar PASTA] [--varrer-tudo] [--quiet]
 
 Só stdlib. Não altera nada no projeto. Gera um JSON com achados por checagem
 (arquivo:linha, trecho com segredos mascarados, confiança) e sinais de contexto
@@ -95,7 +95,7 @@ def is_sensitive_path(rel):
 # ----------------------------------------------------------------------------- utilidades
 
 class SourceFile:
-    __slots__ = ("rel", "path", "text", "ext", "name", "kind", "_offsets", "_lines", "side")
+    __slots__ = ("rel", "path", "text", "ext", "name", "kind", "_offsets", "_lines", "side", "zona", "_code", "_code_lines")
 
     def __init__(self, root, path, text):
         self.path = path
@@ -116,12 +116,29 @@ class SourceFile:
         self._offsets = None
         self._lines = None
         self.side = None
+        self.zona = "app"
+        self._code = None
+        self._code_lines = None
 
     @property
     def lines(self):
         if self._lines is None:
             self._lines = self.text.split("\n")
         return self._lines
+
+    @property
+    def code(self):
+        """Texto sem comentários (mesmo tamanho, mesmas linhas). Só em código, SQL e HTML; o resto volta igual."""
+        if self._code is None:
+            comenta = self.kind in ("code", "sql") or self.ext in (".html", ".htm", ".rules") or self.name == "database.rules.json"
+            self._code = tirar_comentarios(self.text, self.ext) if comenta else self.text
+        return self._code
+
+    @property
+    def code_lines(self):
+        if self._code_lines is None:
+            self._code_lines = self.code.split("\n")
+        return self._code_lines
 
     def lineno(self, offset):
         if self._offsets is None:
@@ -136,8 +153,8 @@ class SourceFile:
         ls = self.lines
         return ls[n - 1] if 0 < n <= len(ls) else ""
 
-    def window(self, n, before=3, after=3):
-        ls = self.lines
+    def window(self, n, before=3, after=3, codigo=False):
+        ls = self.code_lines if codigo else self.lines
         return "\n".join(ls[max(0, n - 1 - before): min(len(ls), n + after)])
 
 
@@ -155,10 +172,11 @@ def chunks(ln, size=4000, overlap=400):
         yield i, ln[i:i + size]
 
 
-def run(cmd, cwd, timeout=60):
+def run(cmd, cwd, timeout=60, inp=None):
     cmd = [shutil.which(cmd[0]) or cmd[0]] + list(cmd[1:])
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, input=inp,
+                           encoding="utf-8", errors="replace")
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError:
         return 127, "", "not found"
@@ -178,6 +196,197 @@ def parse_version(v):
             return None
         return (int(m2.group(1)), int(m2.group(2) or 0), 0, None)
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4))
+
+
+# ----------------------------------------------------------------------------- comentários
+# O texto de cada comentário vira espaço e as quebras de linha ficam: offsets e números de linha continuam
+# valendo, e nenhuma regra dispara em código comentado, nota ou TODO. Strings são respeitadas.
+_NAO_QUEBRA = re.compile(r"[^\n]")
+_STR_LINHA = r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
+_STR_CRASE = r"`(?:\\.|[^`\\]){0,100000}`"
+_COM_C = r"/\*[\s\S]*?\*/|(?<![:\\])//[^\n]*"
+_COM_HTML = r"<!--[\s\S]*?-->"
+_COMENTARIO_RX = {
+    "c": re.compile(rf"(?P<s>{_STR_LINHA}|{_STR_CRASE})|(?P<c>{_COM_C})"),
+    "c_html": re.compile(rf"(?P<s>{_STR_LINHA}|{_STR_CRASE})|(?P<c>{_COM_HTML}|{_COM_C})"),
+    "html": re.compile(rf"(?P<s>{_STR_LINHA})|(?P<c>{_COM_HTML})"),
+    "php": re.compile(rf"(?P<s>{_STR_LINHA})|(?P<c>{_COM_HTML}|{_COM_C}|#(?!\[)[^\n]*)"),
+    "hash": re.compile(r'(?P<s>"""[\s\S]{0,200000}?"""|\'\'\'[\s\S]{0,200000}?\'\'\'|' + _STR_LINHA + r")|(?P<c>(?<![$?])#(?!\{)[^\n]*)"),
+    "sql": re.compile(r"(?P<s>'(?:''|[^']){0,100000}'|\"(?:\"\"|[^\"\n]){0,1000}\")|(?P<c>--[^\n]*|/\*[\s\S]*?\*/)"),
+}
+_MODO_COMENTARIO = {".py": "hash", ".rb": "hash", ".ex": "hash", ".exs": "hash", ".graphql": "hash", ".gql": "hash",
+                    ".php": "php", ".sql": "sql", ".erb": "html", ".html": "html", ".htm": "html", ".vue": "c_html",
+                    ".svelte": "c_html", ".astro": "c_html", ".razor": "c_html", ".cshtml": "c_html"}
+
+
+def tirar_comentarios(text, ext):
+    if not any(m in text for m in ("//", "/*", "#", "--", "<!--")):
+        return text
+    rx = _COMENTARIO_RX[_MODO_COMENTARIO.get(ext, "c")]
+    return rx.sub(lambda m: m.group(0) if m.group("c") is None else _NAO_QUEBRA.sub(" ", m.group("c")), text)
+
+
+# ----------------------------------------------------------------------------- .gitignore e --ignorar
+def _padrao_para_regex(pat):
+    """Padrão no formato do .gitignore → regex sobre o caminho relativo (separador '/')."""
+    so_pasta = pat.endswith("/")
+    pat = pat.rstrip("/")
+    ancorado = "/" in pat
+    pat = pat.lstrip("/")
+    i, out = 0, []
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+            continue
+        if pat.startswith("/**", i) and i + 3 == len(pat):
+            out.append("/.*")
+            i += 3
+            continue
+        if pat.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        c = pat[i]
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[" and pat.find("]", i + 2) != -1:
+            j = pat.find("]", i + 2)
+            corpo = pat[i + 1:j]
+            out.append("[" + ("^" + corpo[1:] if corpo.startswith("!") else corpo).replace("\\", "\\\\") + "]")
+            i = j
+        elif c == "\\" and i + 1 < len(pat):
+            i += 1
+            out.append(re.escape(pat[i]))
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("^" + ("" if ancorado else "(?:.*/)?") + "".join(out) + ("/.+" if so_pasta else "(?:/.*)?") + "$")
+
+
+def ler_padroes(texto, base=""):
+    """Linhas no formato do .gitignore → [(negado, regex, pasta_base, texto_original)]."""
+    pads = []
+    for ln in texto.splitlines():
+        ln = re.sub(r"(?<!\\)[ \t]+$", "", ln.rstrip("\r"))
+        if not ln or ln.startswith("#"):
+            continue
+        neg = ln.startswith("!")
+        if neg:
+            ln = ln[1:]
+        if ln.startswith(("\\#", "\\!")):
+            ln = ln[1:]
+        if ln.strip("/"):
+            try:
+                pads.append((neg, _padrao_para_regex(ln), base, ("!" if neg else "") + ln))
+            except re.error:
+                continue  # padrão que o scanner não entende: segue sem ele
+    return pads
+
+
+def casa_padroes(pads, rel):
+    """Último padrão que casa decide (como no git). Devolve o texto do padrão que ignorou, ou None."""
+    quem = None
+    for neg, rx, base, txt in pads:
+        if base and not rel.startswith(base):
+            continue
+        if rx.match(rel[len(base):] if base else rel):
+            quem = None if neg else txt
+    return quem
+
+
+# Pastas da raiz que não entram no app publicado: documentação e exemplos (com package.json próprio, são app).
+FORA_DO_BUILD = {"docs", "doc", "documentation", "documentacao", "documentação", "examples", "example", "exemplos",
+                 "exemplo", "samples", "sample"}
+ARQUIVO_IGNORAR = ".check-pre-lancamento-ignore"
+
+
+# ----------------------------------------------------------------------------- SQL em comandos
+_SQL_TOKEN = re.compile(r"\$(?:[A-Za-z_]\w*)?\$|'(?:''|[^']){0,100000}'|;")
+_CORPO_DOLAR = re.compile(r"\$(\w*)\$[\s\S]*?\$\1\$")
+
+
+def sql_comandos(code):
+    """[(offset, texto normalizado sem corpo de função, texto cru)] de cada comando SQL.
+    Recebe o texto já sem comentários; respeita strings e corpos $$...$$ (que têm ';' dentro)."""
+    out, ini, tag = [], 0, None
+    for m in _SQL_TOKEN.finditer(code):
+        tok = m.group(0)
+        if tag is not None:
+            if tok == tag:
+                tag = None
+            continue
+        if tok.startswith("$"):
+            tag = tok
+            continue
+        if tok == ";":
+            out.append((ini, code[ini:m.end()]))
+            ini = m.end()
+    if code[ini:].strip():
+        out.append((ini, code[ini:]))
+    res = []
+    for off, cru in out:
+        lead = len(cru) - len(cru.lstrip())
+        norm = re.sub(r"\s+", " ", _CORPO_DOLAR.sub("$$", cru).replace('"', "")).strip().rstrip(";").strip().lower()
+        if norm:
+            res.append((off + lead, norm, cru))
+    return res
+
+
+def _nome_sql(n):
+    n = n.strip().replace('"', "").lower()
+    return n if "." in n else "public." + n
+
+
+# Palavras do nome da tabela que indicam catálogo (dado de referência) ou dado de usuário.
+_CATALOGO = {"cid", "cbhpm", "tuss", "cnae", "ncm", "cfop", "ibge", "cep", "ceps", "pais", "paises", "country", "countries",
+             "estado", "estados", "state", "states", "uf", "ufs", "cidade", "cidades", "city", "cities", "municipio", "municipios",
+             "bairro", "bairros", "categoria", "categorias", "category", "categories", "tipo", "tipos", "type", "types", "tag",
+             "tags", "plano", "planos", "plan", "plans", "preco", "precos", "price", "prices", "pricing", "faq", "faqs", "feriado",
+             "feriados", "holiday", "holidays", "moeda", "moedas", "currency", "currencies", "idioma", "idiomas", "language",
+             "languages", "especialidade", "especialidades", "specialty", "specialties", "procedimento", "procedimentos",
+             "catalog", "catalogo", "catalogs", "lookup", "lookups", "referencia", "referencias", "tabela", "tabelas", "enum",
+             "enums", "status", "unidade", "unidades", "unit", "units", "feature", "features", "product", "products",
+             "produto", "produtos", "config", "configs", "configuracao", "configuracoes"}
+_DADO_PESSOAL = {"user", "users", "usuario", "usuarios", "profile", "profiles", "perfil", "perfis", "cliente", "clientes",
+                 "customer", "customers", "paciente", "pacientes", "patient", "patients", "pedido", "pedidos", "order", "orders",
+                 "payment", "payments", "pagamento", "pagamentos", "invoice", "invoices", "fatura", "faturas", "message",
+                 "messages", "mensagem", "mensagens", "chat", "chats", "conversa", "conversas", "document", "documents",
+                 "documento", "documentos", "file", "files", "arquivo", "arquivos", "appointment", "appointments",
+                 "agendamento", "agendamentos", "consulta", "consultas", "prontuario", "prontuarios", "address", "addresses",
+                 "endereco", "enderecos", "card", "cards", "cartao", "cartoes", "subscription", "subscriptions", "assinatura",
+                 "assinaturas", "transaction", "transactions", "transacao", "transacoes", "lead", "leads", "contact",
+                 "contacts", "contato", "contatos", "note", "notes", "nota", "notas", "account", "accounts", "conta", "contas",
+                 "member", "members", "membro", "membros", "session", "sessions", "token", "tokens", "log", "logs", "audit",
+                 "employee", "employees", "funcionario", "funcionarios", "aluno", "alunos", "student", "students"}
+
+
+def tipo_de_tabela(nome):
+    """'catalogo', 'pessoal' ou '' pelo nome da tabela (a última palavra pesa mais: user_types é catálogo)."""
+    pals = [re.sub(r"\d+$", "", p) for p in nome.split(".")[-1].split("_") if p]
+    if not pals:
+        return ""
+    if pals[-1] in _CATALOGO:
+        return "catalogo"
+    if any(p in _DADO_PESSOAL for p in pals):
+        return "pessoal"
+    return "catalogo" if any(p in _CATALOGO for p in pals) else ""
+
+
+# ----------------------------------------------------------------------------- dependências só de build
+FERRAMENTA_DE_BUILD_RX = re.compile(
+    r"^(?:vite|esbuild|rollup|webpack(?:-cli|-dev-server)?|rspack|@rspack/.+|parcel|turbo|typescript|ts-node|tsx|tsup|"
+    r"@vitejs/.+|vite-plugin-.+|@vite-pwa/.+|tailwindcss|@tailwindcss/.+|postcss(?:-.+)?|autoprefixer|sass|less|stylus|terser|"
+    r"@babel/.+|babel-.+|@swc/.+|eslint(?:-.+)?|@eslint/.+|@typescript-eslint/.+|prettier(?:-.+)?|@types/.+|lovable-tagger|"
+    r"vitest|@vitest/.+|jest(?:-.+)?|@jest/.+|playwright|@playwright/.+|cypress|@testing-library/.+|nodemon|concurrently|"
+    r"cross-env|husky|lint-staged|@commitlint/.+|drizzle-kit|prisma|supabase|wrangler|vercel|netlify-cli|@cloudflare/workers-types|"
+    r"@storybook/.+|storybook|rimraf|npm-run-all2?|dotenv-cli|@biomejs/biome|knip|depcheck|patch-package|eslint-config-next|"
+    r"@next/eslint-plugin-next|@nuxt/devtools|@sveltejs/vite-plugin-svelte|@sveltejs/adapter-.+|@astrojs/check|electron-builder|"
+    r"@electron-forge/.+|@tauri-apps/cli|@capacitor/cli)$")
+ARQUIVO_DE_BUILD_RX = re.compile(r"(^|/)[\w.-]*\.config\.[cm]?[jt]sx?$|(^|/)(scripts|tools|\.storybook|\.husky|bin)/|"
+                                 r"(^|/)(gulpfile|gruntfile|webpack\.[\w.-]+|rollup\.[\w.-]+)\.[cm]?[jt]s$", re.I)
 
 
 # ----------------------------------------------------------------------------- scanner
@@ -206,6 +415,10 @@ class Scanner:
         self.git = {"repo": False}
         self.routes = []
         self.avisos = []
+        self.so_segredos = []  # fora do build ou --ignorar: ainda passam pela busca de segredo
+        self.zonas = {}
+        self._gitignores = []
+        self._uso_cache = {}
 
     # -- registro --------------------------------------------------------------
     def add(self, cid, rule, f=None, line=None, text=None, conf="media", note=""):
@@ -226,15 +439,16 @@ class Scanner:
             item["trecho"] = snippet(text)
         self.findings[cid].append(item)
 
-    def rx_rule(self, cid, rule, rx, files, conf, note, skip_line=None, near=None, near_window=5, flags=0):
+    def rx_rule(self, cid, rule, rx, files, conf, note, skip_line=None, near=None, near_window=5, flags=0, comentarios=False):
+        """Regra por regex. Por padrão não olha comentários (código comentado não roda); comentarios=True olha."""
         pattern = re.compile(rx, flags) if isinstance(rx, str) else rx
         for f in files:
-            for m in pattern.finditer(f.text):
+            for m in pattern.finditer(f.text if comentarios else f.code):
                 n = f.lineno(m.start())
                 ln = f.line(n)
                 if skip_line and re.search(skip_line, ln):
                     continue
-                if near and not re.search(near, f.window(n, near_window, near_window), re.I):
+                if near and not re.search(near, f.window(n, near_window, near_window, codigo=not comentarios), re.I):
                     continue
                 if len(ln) > 400:  # linha minificada: o trecho é a vizinhança do achado
                     col = m.start() - (f._offsets[n - 1] if f._offsets else 0)
@@ -243,11 +457,14 @@ class Scanner:
 
     # -- coleta ----------------------------------------------------------------
     def collect(self):
+        lidos = []
         for dirpath, dirnames, filenames in os.walk(self.root):
             rel_dir = os.path.relpath(dirpath, self.root).replace("\\", "/")
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and d != ".git"
                            and not AGENT_DIR_RX.search(f"{rel_dir}/{d}")]
-            if len(self.files) >= MAX_FILES:
+            if ".gitignore" in filenames:
+                self._gitignores.append("" if rel_dir == "." else rel_dir + "/")
+            if len(lidos) >= MAX_FILES:
                 self.truncated = True
                 break
             for fn in filenames:
@@ -276,7 +493,98 @@ class Scanner:
                     continue
                 else:
                     text = raw.decode("utf-8-sig", "replace")
-                self.files.append(SourceFile(self.root, p, text))
+                lidos.append(SourceFile(self.root, p, text))
+        self.classificar_zonas(lidos)
+        # .env fica sempre (o que tem prefixo público vai pro bundle mesmo ignorado pelo git), menos dentro de pasta ignorada
+        self.files = [f for f in lidos if f.zona == "app" or (f.kind == "env" and f.zona != "gitignore_pasta")]
+        # zip sem git não diz o que está versionado, e arquivo ignorado vai para o deploy feito da máquina: segredo é procurado em tudo
+        self.so_segredos = [f for f in lidos if f.zona != "app" and f.kind != "env"]
+
+    def classificar_zonas(self, arquivos):
+        """Marca o que fica fora das regras de código: .gitignore, pastas fora do build (docs/, examples/) e --ignorar."""
+        z = {"metodo_gitignore": None, "padroes_ignorar": [], "gitignore": {}, "fora_do_build": {}, "ignorado": {}}
+        self.zonas = z
+        if getattr(self.args, "varrer_tudo", False):
+            z["metodo_gitignore"] = "desligado (--varrer-tudo)"
+            return
+        rels = [f.rel for f in arquivos]
+        pastas = sorted({"/".join(r.split("/")[:k]) + "/" for r in rels for k in range(1, r.count("/") + 1)})
+        ign_arq, ign_pasta = set(), set()
+        rc, out = 1, ""
+        if rels:
+            rc, out, _e = run(["git", "-c", "core.quotePath=false", "check-ignore", "--stdin", "-z"], self.root, 60,
+                              inp="\0".join(rels + pastas) + "\0")
+        if rc in (0, 1) and rels:
+            z["metodo_gitignore"] = "git check-ignore (respeita .gitignore, .git/info/exclude e o exclude global)"
+            hits = {p for p in out.split("\0") if p}
+            ign_pasta = {p for p in hits if p.endswith("/")}
+            ign_arq = hits - ign_pasta
+        elif self._gitignores:
+            z["metodo_gitignore"] = ".gitignore lido pelo scanner (pasta sem git)"
+            pads = []
+            for base in sorted(self._gitignores, key=len):
+                try:
+                    pads += ler_padroes((self.root / base / ".gitignore").read_text(errors="ignore"), base)
+                except Exception:
+                    pass
+            ign_pasta = {d for d in pastas if casa_padroes(pads, d + "\x00")}
+            ign_arq = {r for r in rels if casa_padroes(pads, r)}
+        else:
+            z["metodo_gitignore"] = "sem .gitignore"
+        pedidos = [p.strip() for a in (getattr(self.args, "ignorar", None) or []) for p in a.split(",") if p.strip()]
+        arq = self.root / ARQUIVO_IGNORAR
+        if arq.is_file():
+            try:
+                pedidos += arq.read_text(errors="ignore").splitlines()
+                z["arquivo_ignorar"] = ARQUIVO_IGNORAR
+            except Exception:
+                pass
+        user_pads = ler_padroes("\n".join(re.sub(r"^\./", "", p.strip()) for p in pedidos))
+        z["padroes_ignorar"] = [t for *_x, t in user_pads]
+        # pasta com package.json ou com site publicado (GitHub Pages serve /docs) é app, não documentação
+        com_package = {f.rel.split("/")[0] for f in arquivos if f.rel.count("/") == 1 and
+                       f.name in ("package.json", "index.html", "CNAME", "_config.yml")}
+        for f in arquivos:
+            partes = f.rel.split("/")
+            topo = next((d for d in ("/".join(partes[:k]) + "/" for k in range(1, len(partes))) if d in ign_pasta), None)
+            if topo:
+                f.zona, chave, grupo = "gitignore_pasta", "gitignore", topo
+            elif f.rel in ign_arq:
+                f.zona, chave, grupo = "gitignore", "gitignore", f.rel
+                if f.kind == "env":
+                    continue  # continua sendo lido
+            elif user_pads and casa_padroes(user_pads, f.rel):
+                f.zona, chave, grupo = "ignorado", "ignorado", casa_padroes(user_pads, f.rel)
+            elif len(partes) > 1 and partes[0].lower() in FORA_DO_BUILD and partes[0] not in com_package:
+                f.zona, chave, grupo = "fora_do_build", "fora_do_build", partes[0] + "/"
+            else:
+                continue
+            z[chave][grupo] = z[chave].get(grupo, 0) + 1
+
+    def resumo_zonas(self):
+        z = self.zonas or {}
+
+        def bloco(d):
+            itens = sorted(d.items(), key=lambda kv: (-kv[1], kv[0]))
+            return {"arquivos": sum(d.values()), "pastas": [{"caminho": k, "arquivos": v} for k, v in itens[:15]],
+                    "mais_pastas": max(0, len(itens) - 15)}
+        out = {"gitignore": z.get("metodo_gitignore"), "ignorados_pelo_gitignore": bloco(z.get("gitignore", {})),
+               "fora_do_build": bloco(z.get("fora_do_build", {})),
+               "ignorados_a_pedido": {**bloco(z.get("ignorado", {})), "padroes": z.get("padroes_ignorar", [])}}
+        if z.get("arquivo_ignorar"):
+            out["ignorados_a_pedido"]["arquivo"] = z["arquivo_ignorar"]
+        partes = []
+        for chave, rotulo in (("ignorados_pelo_gitignore", "do .gitignore"), ("fora_do_build", "fora do build"),
+                              ("ignorados_a_pedido", "por --ignorar/" + ARQUIVO_IGNORAR)):
+            b = out[chave]
+            if b["arquivos"]:
+                nomes = ", ".join(p["caminho"] for p in b["pastas"][:4]) + ("…" if len(b["pastas"]) > 4 else "")
+                partes.append(f"{b['arquivos']} {rotulo} ({nomes})")
+        if partes:
+            self.avisos.append("Fora das regras de código: " + "; ".join(partes) + ". Segredos continuam sendo procurados em "
+                               "todas essas pastas (no que o .gitignore ignora, com confiança baixa: não vai para o Git, mas vaza se "
+                               "entrar no build). Use --varrer-tudo para incluir tudo.")
+        return out
 
     def code(self):
         return [f for f in self.files if f.kind == "code"]
@@ -572,7 +880,8 @@ class Scanner:
 
     # -- C01 / C03 segredos ----------------------------------------------------
     def scan_secrets(self):
-        for f in self.files:
+        fora = {id(f): f.zona for f in self.so_segredos}
+        for f in self.files + self.so_segredos:
             if f.kind == "env" and not is_env_example(f.name):
                 self.scan_env_file(f)
                 continue
@@ -610,6 +919,12 @@ class Scanner:
                     if re.search(r"(^|/)(tests?|__tests__|spec|fixtures?|mocks?|__mocks__|examples?)/", f.rel):
                         conf = "baixa" if conf != "alta" else "media"
                     note = desc + (" — arquivo vai pro navegador/app" if client else "")
+                    if fora.get(id(f), "").startswith("gitignore"):
+                        if not re.search(r"(^|/)(public|static|www|wwwroot|assets|dist|build)/", f.rel):
+                            conf = "baixa"
+                        note += " (arquivo ignorado pelo git: não vai para o repositório, mas vaza se entrar no build ou num deploy feito da sua máquina)"
+                    elif id(f) in fora:
+                        note += " (pasta fora das regras de código; se o arquivo está no Git, a chave vazou do mesmo jeito)"
                     if client and conf == "media" and pid not in ("google_api_key", "generic_assignment", "stripe_test"):
                         conf = "alta"
                     self.add("C01", pid, f, n, ln, conf, note)
@@ -617,7 +932,7 @@ class Scanner:
         # valores sem aspas em arquivos de configuração (application.properties, *.yml, *.ini, *.toml)
         cfg_rx = re.compile(r"(?im)^[ \t]*([\w.\-]*(?:password|passwd|secret|api[_-]?key|apikey|token|private[_-]?key|access[_-]?key)[\w.\-]*)"
                             r"\s*[:=]\s*([^\s#'\"${}<>][^\s#'\"]{7,})\s*$")
-        for f in self.files:
+        for f in self.files + self.so_segredos:
             if f.kind != "config" or f.ext not in (".properties", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".conf"):
                 continue
             for m in cfg_rx.finditer(f.text):
@@ -876,62 +1191,401 @@ class Scanner:
                 pass
         self.signals["C02"]["linhas_de_historico_lidas"] = lines_read
 
-    # -- C04 RLS / regras --------------------------------------------------------
-    def scan_rls(self):
-        sql_files = sorted([f for f in self.files if f.ext == ".sql"], key=lambda f: f.rel)
-        name_rx = r"((?:\"?[\w]+\"?\.)?\"?[\w]+\"?)"
-        create_rx = re.compile(r"create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?" + name_rx, re.I)
-        enable_rx = re.compile(r"alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?" + name_rx + r"\s+enable\s+row\s+level\s+security", re.I)
-        disable_rx = re.compile(r"alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?" + name_rx + r"\s+disable\s+row\s+level\s+security", re.I)
-        policy_rx = re.compile(r"create\s+policy\s+(\"[^\"]+\"|[\w]+)\s+on\s+" + name_rx + r"([^;]{0,4000});", re.I)
+    # -- C04 RLS, policies, grants, funções e views (Supabase/PostgREST) ------------
+    PAPEIS_SERVICO = {"service_role", "postgres", "supabase_admin", "supabase_auth_admin", "supabase_storage_admin",
+                      "dashboard_user", "supabase_realtime_admin", "authenticator", "pgbouncer", "supabase_read_only_user"}
+    FUNCAO_PERIGOSA_RX = re.compile(r"delete|drop|truncate|purge|wipe|reset|admin|grant|revoke|promote|set_?role|impersonat|bypass|"
+                                    r"exec|_sql|sql_|all_users|apagar|excluir|remover|tornar_admin|alterar_papel|update_user")
+    ESCRITA = {"insert", "update", "delete"}
+    PAPEIS_API = {"anon", "authenticated", "public"}
 
-        def norm(t):
-            t = t.replace('"', "").lower()
-            return t if "." in t else "public." + t
+    def scan_rls(self):
+        self.scan_sql_banco()
+        self.scan_supabase_api_config()
+        self.scan_firebase_rules()
+
+    def _avaliar_policy(self, f, n, ln, nome, tabela, resto, cont):
+        cabeca = re.split(r"\b(?:using|with check)\b", resto, 1)[0]
+        if re.search(r"user_metadata|raw_user_meta_data", resto):
+            self.add("C07", "policy_usa_user_metadata", f, n, ln, "alta",
+                     "Policy decide acesso por user_metadata — o próprio usuário consegue editar esse campo")
+        if re.search(r"\bas restrictive\b", cabeca):
+            return  # policy restritiva só tira acesso
+        m = re.search(r"\bfor (all|select|insert|update|delete)\b", cabeca)
+        cmd = m.group(1) if m else "all"
+        m = re.search(r"\bto ([\w$, ]+?)\s*$", cabeca)
+        roles = {r.strip() for r in m.group(1).split(",") if r.strip()} if m else {"public"}
+        if roles <= self.PAPEIS_SERVICO:
+            return
+        aberta = re.search(r"\b(?:using|with check) \(\s*(?:\(\s*)?(?:true|1\s*=\s*1)(?:\s*\))?\s*\)", resto)
+        logado = re.search(r"\b(?:using|with check) \(\s*\(?\s*(?:auth\.role\(\)\s*=\s*'authenticated'|\(?\s*(?:select )?auth\.uid\(\)\s*\)?"
+                           r"\s+is not null)\s*\)?\s*\)", resto)
+        if not aberta and not logado:
+            return
+        publico = bool(roles & {"public", "anon"}) and bool(aberta)
+        escrita = cmd != "select"
+        so_insert = cmd == "insert"
+        tipo = tipo_de_tabela(tabela)
+        storage = tabela == "storage.objects"
+        quem = ", ".join(sorted(roles))
+        dica = {"catalogo": " Parece catálogo (dado de referência): normalmente ok.",
+                "pessoal": " O nome da tabela parece dado de usuário: confirme.", "": ""}[tipo]
+        if publico and escrita:
+            regra, conf = "policy_publica_escrita", "media" if so_insert and not storage else "alta"
+            nota = (f"Policy {nome} ({cmd}) em {tabela}, para {quem}, sem condição: " +
+                    ("qualquer visitante insere linhas. Em formulário público é o esperado, desde que tenha captcha ou rate limit e "
+                     "não exista leitura pública da tabela." if so_insert and not storage else "qualquer visitante, sem login, "
+                     + ("sobe arquivo em qualquer bucket." if storage else "altera ou apaga.")))
+        elif publico:
+            regra = "policy_publica_leitura"
+            conf = "alta" if storage or tipo == "pessoal" else "baixa" if tipo == "catalogo" else "media"
+            nota = (f"Policy {nome} (select) em {tabela}, para {quem}: leitura pública, sem login." +
+                    (" Em storage.objects isso libera todos os buckets, inclusive os privados." if storage else dica))
+        elif escrita:
+            regra, conf = "policy_qualquer_logado_escrita", "media" if so_insert else "alta"
+            nota = (f"Policy {nome} ({cmd}) em {tabela} só exige estar logado, sem checar o dono: qualquer conta " +
+                    ("insere linha em nome de qualquer um (amarre user_id = auth.uid() no with check)." if so_insert
+                     else "altera ou apaga linha de outra conta. O cadastro é aberto?"))
+        else:
+            regra = "policy_qualquer_logado_leitura"
+            conf = "alta" if tipo == "pessoal" else "baixa" if tipo == "catalogo" else "media"
+            nota = f"Policy {nome} (select) em {tabela}: qualquer conta logada lê todas as linhas." + dica
+        cont[regra.replace("policy_", "").replace("qualquer_", "")] += 1
+        self.add("C04", regra, f, n, ln, conf, nota)
+
+    def scan_sql_banco(self):
+        """Lê as migrations comando por comando, na ordem, sem comentários: tabelas e RLS, policies (separando visitante de
+        conta logada), GRANT/REVOKE, privilégios padrão, funções SECURITY DEFINER e views."""
+        sql_files = sorted([f for f in self.files if f.ext == ".sql"], key=lambda f: f.rel)
+        supa = bool(self.stack.get("supabase")) or any("supabase/" in f.rel for f in sql_files)
+        expostos = {"public", "storage", "graphql_public", "realtime"}  # Data API, Storage e Realtime leem estes
+        cfg = next((f for f in self.files if f.rel.endswith("supabase/config.toml")), None)
+        sec = re.search(r"(?ms)^\[api\][ \t]*$(.*?)(?=^\[[\w.\-]+\][ \t]*$|\Z)", cfg.text) if cfg else None
+        m = re.search(r"(?m)^[ \t]*schemas[ \t]*=[ \t]*\[([^\]]*)\]", sec.group(1)) if sec else None
+        if m:
+            expostos |= {x.strip().strip("'\"").lower() for x in m.group(1).split(",") if x.strip()}
+
+        def exposto(nome_completo):
+            return nome_completo.split(".", 1)[0] in expostos
+        nome = r"([\w$]+(?:\.[\w$]+)?)"
+        create_rx = re.compile(r"^create (?:(?:global |local )?(?:temp|temporary|unlogged) )?table (?:if not exists )?" + nome)
+        alter_rx = re.compile(r"^alter table (?:if exists )?(?:only )?" + nome)
+        policy_rx = re.compile(r'^create policy ("(?:[^"]|"")*"|[\w$]+) on ("?[\w$]+"?(?:\."?[\w$]+"?)?)(.*)$')
+        grant_rx = re.compile(r"^grant (.+?) on (.+?) to (.+?)(?: with grant option)?(?: granted by [\w$]+)?$")
+        revoke_rx = re.compile(r"^revoke (?:grant option for )?(.+?) on (.+?) from (.+?)(?: granted by [\w$]+)?(?: cascade| restrict)?$")
+        adp_rx = re.compile(r"^alter default privileges(?: for (?:role|user) [\w$, ]+?)?(?: in schema ([\w$, ]+?))? (grant|revoke) "
+                            r"(?:grant option for )?(.+?) on (tables|functions|routines|sequences|types|schemas) (?:to|from) (.+?)"
+                            r"(?: with grant option)?(?: cascade| restrict)?$")
+        func_rx = re.compile(r"^create (?:or replace )?(?:function|procedure) " + nome + r"\s*\(")
+        alter_func_rx = re.compile(r"^alter (?:function|procedure|routine) " + nome + r"\s*\(")
+        view_rx = re.compile(r"^create (?:or replace )?(?:temp |temporary )?(?:recursive )?(materialized )?view (?:if not exists )?" + nome)
+        alter_view_rx = re.compile(r"^alter (?:materialized )?view (?:if exists )?" + nome + r" (set|reset) \(([^)]*)\)")
+        invoker_falso = re.compile(r"security_invoker\s*=\s*'?(?:false|off|0|no)\b")
+
+        def privs(txt):
+            out = set()
+            for x in re.sub(r"\([^)]*\)", "", txt).split(","):
+                x = x.strip()
+                if x in ("all", "all privileges"):
+                    out |= {"select", "insert", "update", "delete", "truncate", "references", "trigger", "execute", "usage"}
+                elif x:
+                    out.add(x)
+            return out
+
+        def papeis(txt):
+            return {p.strip() for p in re.sub(r"\bgroup\b", "", txt).split(",") if p.strip()} & self.PAPEIS_API
+
+        def alvo(txt):
+            txt = txt.strip()
+            m = re.match(r"all (tables|functions|routines|procedures|sequences) in schema ([\w$, ]+)$", txt)
+            if m:
+                tipo = "functions" if m.group(1) in ("functions", "routines", "procedures") else m.group(1)
+                return "todas_" + tipo, [x.strip() for x in m.group(2).split(",")]
+            m = re.match(r"(?:function|routine|procedure) (.+)$", txt)
+            if m:
+                nomes = re.findall(r"([\w$]+(?:\.[\w$]+)?)\s*(?:\(|,|$)", re.sub(r"\([^)]*\)", "()", m.group(1)))
+                return "functions", [_nome_sql(x) for x in nomes]
+            if re.match(r"(?:sequence|schema|database|large object|foreign|language|tablespace|type|domain|parameter) ", txt):
+                return None, []
+            return "tables", [_nome_sql(x) for x in re.sub(r"^table ", "", txt).split(",") if x.strip()]
 
         created, enabled, disabled = {}, set(), {}
+        tab = {p: {} for p in self.PAPEIS_API}   # papel -> relação -> privilégios dados nas migrations
+        revogado = {}                            # relação -> papéis que perderam o select
+        adp_tab, adp_fun, adp_origem = {}, {}, {}
+        funcs, views = {}, {}
+        massa_tab, massa_fun, padrao, origem_anon = [], [], [], []
+        houve_permissao = False
+        cont = {"publica_leitura": 0, "publica_escrita": 0, "logado_leitura": 0, "logado_escrita": 0}
+
+        def dar(t, quem, pv, onde):
+            for p in quem:
+                tab[p].setdefault(t, set()).update(pv)
+                if "select" in pv and t in revogado:
+                    revogado[t].discard(p)
+            if pv & self.ESCRITA and quem & {"anon", "public"}:
+                origem_anon.append(onde)
+
         for f in sql_files:
-            for m in create_rx.finditer(f.text):
-                t = norm(m.group(1))
-                if t.split(".")[0] in ("public",):
-                    created.setdefault(t, (f, f.lineno(m.start())))
-            for m in enable_rx.finditer(f.text):
-                enabled.add(norm(m.group(1)))
-            for m in disable_rx.finditer(f.text):
-                disabled[norm(m.group(1))] = (f, f.lineno(m.start()))
-            for m in policy_rx.finditer(f.text):
-                body = m.group(3).lower()
-                n = f.lineno(m.start())
-                cmd = re.search(r"\bfor\s+(all|select|insert|update|delete)\b", body)
-                cmd = cmd.group(1) if cmd else "all"
-                permissive = re.search(r"using\s*\(\s*true\s*\)|with\s+check\s*\(\s*true\s*\)", body)
-                loose = re.search(r"(?:using|with\s+check)\s*\(\s*(?:1\s*=\s*1|auth\.role\(\)\s*=\s*'authenticated'|"
-                                  r"\(?\s*(?:select\s+)?auth\.uid\(\)\s*\)?\s+is\s+not\s+null)\s*\)", body)
-                if loose and not permissive:
-                    write = cmd in ("all", "insert", "update", "delete")
-                    self.add("C04", "policy_qualquer_logado", f, n, f.line(n), "alta" if write else "media",
-                             f"Policy {m.group(1)} ({cmd}) só exige estar logado, sem checar o dono — qualquer conta (cadastro é aberto) "
-                             + ("escreve" if write else "lê") + " tudo")
-                if permissive:
-                    write = cmd in ("all", "insert", "update", "delete")
-                    self.add("C04", "policy_permissiva", f, n, f.line(n), "alta" if write else "media",
-                             f"Policy {m.group(1)} ({cmd}) com condição true — " +
-                             ("qualquer um com a chave pública escreve" if write else "leitura pública: confirme se é intencional"))
-                if re.search(r"user_metadata|raw_user_meta_data", body):
-                    self.add("C07", "policy_usa_user_metadata", f, n, f.line(n), "alta",
-                             "Policy decide acesso por user_metadata — o próprio usuário consegue editar esse campo")
-        supa = bool(self.stack.get("supabase")) or any("supabase/" in f.rel for f in sql_files)
-        for t, (f, n) in created.items():
-            if t not in enabled and supa:  # Postgres comum (Prisma, Rails…) sem Supabase não expõe tabela ao navegador
+            for off, norm, cru in sql_comandos(f.code):
+                n = f.lineno(off)
+                ln = f.line(n)
+                onde = (f, n, ln)
+                m = create_rx.match(norm)
+                if m:
+                    t = _nome_sql(m.group(1))
+                    if exposto(t) and t not in created:
+                        created[t] = (f, n)
+                        for p, pv in adp_tab.items():
+                            if pv:
+                                dar(t, {p}, pv, adp_origem.get(p, onde))
+                    continue
+                m = alter_rx.match(norm)
+                if m:
+                    t = _nome_sql(m.group(1))
+                    if "enable row level security" in norm:
+                        enabled.add(t)
+                        disabled.pop(t, None)
+                    if "disable row level security" in norm:
+                        disabled[t] = (f, n)
+                        enabled.discard(t)
+                    continue
+                if norm.startswith("create policy "):
+                    m = policy_rx.match(re.sub(r"\s+", " ", _CORPO_DOLAR.sub("$$", cru)).strip().rstrip(";").strip().lower())
+                    if m and exposto(_nome_sql(m.group(2))):  # policy em schema que a API não expõe não abre nada sozinha
+                        self._avaliar_policy(f, n, ln, m.group(1).strip('"').replace('""', '"'), _nome_sql(m.group(2)),
+                                             m.group(3).replace('"', ""), cont)
+                    continue
+                m = adp_rx.match(norm)
+                if m:
+                    houve_permissao = True
+                    if not {x.strip() for x in (m.group(1) or "public").split(",")} & expostos:
+                        continue
+                    op, pv, objt, quem = m.group(2), privs(m.group(3)), m.group(4), papeis(m.group(5))
+                    for p in quem:
+                        if objt == "tables":
+                            atual = adp_tab.setdefault(p, set())
+                            (atual.update if op == "grant" else atual.difference_update)(pv)
+                            adp_origem[p] = onde
+                        elif objt in ("functions", "routines") and "execute" in pv:
+                            adp_fun[p] = op == "grant"
+                    if op == "grant" and quem and objt in ("tables", "functions", "routines", "sequences"):
+                        padrao.append((f, n, ln, objt, sorted(quem), pv))
+                    continue
+                m = grant_rx.match(norm) if norm.startswith("grant ") else None
+                if m:
+                    houve_permissao = True
+                    pv, (tipo, objs), quem = privs(m.group(1)), alvo(m.group(2)), papeis(m.group(3))
+                    if not quem or not tipo:
+                        continue
+                    if tipo == "todas_tables" and set(objs) & expostos:
+                        for t in list(created) + list(views):
+                            dar(t, quem, pv, onde)
+                        massa_tab.append((f, n, ln, sorted(quem), pv))
+                    elif tipo == "tables":
+                        for t in objs:
+                            dar(t, quem, pv, onde)
+                    elif tipo == "todas_functions" and set(objs) & expostos and "execute" in pv:
+                        publicas = [fn for k, fn in funcs.items() if k.split(".", 1)[0] in set(objs) & expostos]
+                        for fn in publicas:
+                            for p in quem:
+                                if fn["exec"][p] is False:  # tinha sido fechada de propósito
+                                    fn.setdefault("reaberta", {})[p] = f"{f.rel}:{n}"
+                                fn["exec"][p] = True
+                        massa_fun.append((f, n, ln, sorted(quem), sum(1 for fn in publicas if fn["secdef"] and not fn["trigger"])))
+                    elif tipo == "functions" and "execute" in pv:
+                        for nf in objs:
+                            if nf in funcs:
+                                for p in quem:
+                                    funcs[nf]["exec"][p] = True
+                    continue
+                m = revoke_rx.match(norm) if norm.startswith("revoke ") else None
+                if m:
+                    houve_permissao = True
+                    pv, (tipo, objs), quem = privs(m.group(1)), alvo(m.group(2)), papeis(m.group(3))
+                    if not quem or not tipo:
+                        continue
+                    if tipo in ("tables", "todas_tables"):
+                        alvos = objs if tipo == "tables" else [t for t in list(created) + list(views) if t.split(".", 1)[0] in objs]
+                        for t in alvos:
+                            for p in quem:
+                                if t in tab[p]:
+                                    tab[p][t] -= pv
+                                if "select" in pv:
+                                    revogado.setdefault(t, set()).add(p)
+                    elif tipo in ("functions", "todas_functions") and "execute" in pv:
+                        alvos = objs if tipo == "functions" else [k for k in funcs if k.split(".", 1)[0] in objs]
+                        for nf in alvos:
+                            if nf in funcs:
+                                for p in quem:
+                                    funcs[nf]["exec"][p] = False
+                    continue
+                m = func_rx.match(norm)
+                if m:
+                    nf = _nome_sql(m.group(1))
+                    attrs = {"secdef": " security definer" in norm, "search_path": " set search_path" in norm,
+                             "trigger": bool(re.search(r"\breturns (?:event_)?trigger\b", norm)), "f": f, "n": n, "ln": ln}
+                    if nf in funcs:
+                        funcs[nf].update(attrs)
+                    else:
+                        funcs[nf] = {"nome": nf, **attrs, "exec": {"public": adp_fun.get("public", True), "anon": adp_fun.get("anon", True),
+                                                                    "authenticated": adp_fun.get("authenticated", True)}}
+                    continue
+                m = alter_func_rx.match(norm)
+                if m:
+                    fn = funcs.get(_nome_sql(m.group(1)))
+                    if fn:
+                        if " security definer" in norm:
+                            fn["secdef"] = True
+                        if " security invoker" in norm:
+                            fn["secdef"] = False
+                        if " set search_path" in norm:
+                            fn["search_path"] = True
+                    continue
+                m = view_rx.match(norm)
+                if m:
+                    v = _nome_sql(m.group(2))
+                    opts = re.search(r"\bwith \(([^)]*security_invoker[^)]*)\)", norm)
+                    if exposto(v):
+                        views[v] = {"f": f, "n": n, "ln": ln, "mat": bool(m.group(1)),
+                                    "invoker": bool(opts) and not invoker_falso.search(opts.group(1))}
+                    continue
+                m = alter_view_rx.match(norm)
+                if m and _nome_sql(m.group(1)) in views and "security_invoker" in m.group(3):
+                    views[_nome_sql(m.group(1))]["invoker"] = m.group(2) == "set" and not invoker_falso.search(m.group(3))
+
+        sem_rls = {t for t in created if t not in enabled}
+        if supa:  # Postgres comum (Prisma, Rails…) sem Supabase não expõe tabela ao navegador
+            for t, (f, n) in created.items():
+                if t in enabled or t in disabled:
+                    continue
+                pv_anon = (tab["anon"].get(t, set()) | tab["public"].get(t, set())) & {"select", "insert", "update", "delete"}
                 self.add("C04", "tabela_sem_rls", f, n, f.line(n), "alta" if "supabase/" in f.rel else "media",
-                         f"Tabela {t} criada sem 'enable row level security' nas migrations")
+                         f"Tabela {t} criada sem 'enable row level security' nas migrations"
+                         + (f" (e o anon tem {', '.join(sorted(pv_anon))} nela por GRANT)" if pv_anon else ""))
         for t, (f, n) in disabled.items():
             self.add("C04", "rls_desativado", f, n, f.line(n), "alta", f"RLS desativado explicitamente em {t}")
-        self.signals["C04"]["tabelas_nas_migrations"] = len(created)
-        self.signals["C04"]["tabelas_com_rls"] = len([t for t in created if t in enabled])
-        if self.stack.get("supabase") and not created:
-            self.signals["C04"]["rls_nao_verificavel_pelo_repo"] = True
 
+        anon_w = sorted({t for p in ("anon", "public") for t, pv in tab[p].items() if pv & self.ESCRITA})
+        if anon_w and origem_anon:
+            f0, n0, ln0 = origem_anon[0]
+            nomes = ", ".join(t.split(".", 1)[-1] for t in anon_w[:12]) + ("…" if len(anon_w) > 12 else "")
+            self.add("C04", "anon_com_escrita", f0, n0, ln0, "alta" if any(t in sem_rls for t in anon_w) else "media",
+                     f"O papel anon (visitante sem login) recebe INSERT/UPDATE/DELETE por GRANT em {len(anon_w)} tabela(s)"
+                     + (" (formato de schema exportado por supabase db pull/dump)" if len(anon_w) >= 5 else "") + f": {nomes}. "
+                     "Hoje só a RLS separa o visitante dos dados, e uma policy errada vira escrita pública. Revogue a escrita do anon "
+                     "nas tabelas que o visitante não escreve (quase sempre todas).")
+        visivel = {"select", "insert", "update", "delete", "truncate"}
+        for f, n, ln, quem, pv in massa_tab:
+            anon = bool(set(quem) & {"anon", "public"})
+            self.add("C04", "grant_em_massa_tabelas", f, n, ln, "alta" if anon and pv & self.ESCRITA and sem_rls else "media",
+                     f"GRANT {', '.join(sorted(pv & visivel))} em todas as tabelas do schema public para {', '.join(quem)}: reabre também "
+                     "as tabelas privadas e as que ainda não têm RLS. É a correção errada mais comum para o erro 42501 (permission "
+                     "denied) que vem com a mudança do Supabase de 30/10/2026. Dê GRANT por tabela, só ao papel que precisa.")
+        for f, n, ln, quem, k in massa_fun:
+            self.add("C04", "grant_execute_em_massa", f, n, ln, "alta" if k else "media",
+                     f"GRANT EXECUTE em todas as funções do schema public para {', '.join(quem)}: devolve também as funções internas "
+                     "que tinham sido fechadas de propósito" + ((" (1 delas é SECURITY DEFINER e ignora a RLS)" if k == 1 else
+                                                                 f" ({k} delas são SECURITY DEFINER e ignoram a RLS)") if k else "")
+                     + ". Conceda só as funções que o app chama por rpc(), uma a uma.")
+        relevante = {"tables": {"select", "insert", "update", "delete", "truncate"}, "functions": {"execute"},
+                     "routines": {"execute"}, "sequences": {"usage", "select", "update"}}
+        for f, n, ln, objt, quem, pv in padrao:
+            efeito = {"tables": "toda tabela nova", "functions": "toda função nova", "routines": "toda função nova",
+                      "sequences": "toda sequence nova"}[objt]
+            self.add("C04", "privilegio_padrao_aberto", f, n, ln, "baixa" if objt == "sequences" else "media",
+                     f"alter default privileges: {efeito} no schema public nasce com {', '.join(sorted(pv & relevante[objt])) or 'tudo'} para "
+                     f"{', '.join(quem)}" + (". Se uma tabela sair sem RLS, ela abre sozinha." if objt == "tables" else
+                                             ". Qualquer um chama por /rest/v1/rpc: revogue o padrão e conceda função a função."
+                                             if objt != "sequences" else "."))
+        for fn in funcs.values():
+            if not fn["secdef"]:
+                continue
+            if not fn["search_path"]:
+                self.add("C04", "security_definer_sem_search_path", fn["f"], fn["n"], fn["ln"], "media",
+                         f"{fn['nome']}() é SECURITY DEFINER sem 'set search_path': um objeto com o mesmo nome em outro schema "
+                         "sequestra a função (lint 0011 do Supabase). Use set search_path = '' e nomes qualificados (public.tabela).")
+            if fn["trigger"] or not exposto(fn["nome"]) or fn["nome"].split(".", 1)[0] in ("storage", "realtime"):
+                continue
+            e = fn["exec"]
+            curto = fn["nome"].split(".", 1)[1]
+            perigosa = bool(self.FUNCAO_PERIGOSA_RX.search(curto))
+            reab = fn.get("reaberta") or {}
+            if e["public"] or e["anon"]:
+                falta = (": revogou de public, mas falta revogar de anon" if not e["public"] else
+                         ": revogou de anon, mas o anon também herda de public" if not e["anon"] else "")
+                volta = next((onde for p, onde in reab.items() if p in ("anon", "public")), None)
+                self.add("C04", "funcao_security_definer_exposta", fn["f"], fn["n"], fn["ln"], "alta" if perigosa or volta else "media",
+                         f"{curto}() é SECURITY DEFINER (roda com o poder do dono e ignora a RLS) e o visitante sem login chama por "
+                         f"/rest/v1/rpc/{curto}{falta}" + (f". Ela tinha sido fechada e foi reaberta pelo GRANT em massa em {volta}" if volta else "")
+                         + f". Se o app não usa antes do login: revoke execute on function {fn['nome']}(…) from public, anon; se é "
+                         "interna, mova para um schema que a API não expõe.")
+            elif e["authenticated"]:
+                volta = reab.get("authenticated")
+                self.add("C04", "funcao_security_definer_exposta", fn["f"], fn["n"], fn["ln"],
+                         ("alta" if perigosa else "media") if volta else "baixa",
+                         f"{curto}() é SECURITY DEFINER e qualquer conta logada chama por /rest/v1/rpc/{curto}"
+                         + (f": ela tinha sido fechada de propósito e o GRANT EXECUTE em massa em {volta} reabriu. Revogue de novo e "
+                            "conceda só as funções que o app chama por rpc()." if volta else
+                            ": confirme que ela confere auth.uid() ou o papel antes de agir."))
+        for v, d in views.items():
+            if {"anon", "authenticated"} <= revogado.get(v, set()):
+                continue
+            if d["mat"]:
+                self.add("C04", "view_materializada_exposta", d["f"], d["n"], d["ln"], "baixa",
+                         f"Materialized view {v} no schema public não tem RLS: tire do schema exposto ou revogue de anon e authenticated.")
+            elif not d["invoker"]:
+                self.add("C04", "view_ignora_rls", d["f"], d["n"], d["ln"], "media",
+                         f"View {v} sem security_invoker: roda com o dono e entrega as linhas que a RLS das tabelas esconderia (lint 0010 "
+                         "do Supabase). Use with (security_invoker = true) ou revogue de anon e authenticated.")
+
+        if supa and created and any(f.rel.startswith("supabase/migrations/") for f in sql_files):
+            usadas = set()
+            for f in self.code():
+                for m in re.finditer(r"\.from\(\s*['\"`]([\w-]+)['\"`]\s*\)", f.code):
+                    if "storage" not in f.code[max(0, m.start() - 40): m.start()]:
+                        usadas.add("public." + m.group(1).lower())
+            com_grant = {t for p in self.PAPEIS_API for t, pv in tab[p].items() if pv & {"select", "insert", "update", "delete"}}
+            sem_grant = sorted(t for t in usadas & set(created) if t not in com_grant)
+            if sem_grant:
+                f0, n0 = created[sem_grant[0]]
+                self.add("P04", "tabela_sem_grant_explicito", f0, n0, f0.line(n0), "baixa",
+                         f"{len(sem_grant)} tabela(s) que o app usa não recebem GRANT nas migrations ("
+                         + ", ".join(t.split(".", 1)[1] for t in sem_grant[:10]) + ("…" if len(sem_grant) > 10 else "") + "). A partir de "
+                         "30/10/2026 tabela nova no public não ganha acesso automático: num projeto novo (staging, branch, restauração) "
+                         "o app dá erro 42501 nelas. Ponha na migration o GRANT de cada tabela só para o papel que precisa, junto com a RLS.")
+        if supa and created and not houve_permissao:
+            self.add("C04", "permissoes_do_banco_nao_verificadas", None, None, None, "baixa",
+                     "As migrations não têm GRANT nem REVOKE: o que anon e authenticated podem fazer segue o padrão do projeto (até "
+                     "30/10/2026, toda tabela nova no public ganhava SELECT, INSERT, UPDATE e DELETE para os dois, e toda função é "
+                     "executável por todos). A RLS é a única barreira. Rode a consulta de permissões de references/stacks/baas.md.")
+
+        sig = self.signals["C04"]
+        sig["tabelas_nas_migrations"] = len(created)
+        sig["tabelas_com_rls"] = len([t for t in created if t in enabled])
+        if self.stack.get("supabase") and not created:
+            sig["rls_nao_verificavel_pelo_repo"] = True
+        if sql_files:
+            sig["politicas_abertas"] = cont
+            sig["grants_ou_revokes_nas_migrations"] = houve_permissao
+            sig["tabelas_com_escrita_do_anon_por_grant"] = len(anon_w)
+            sig["funcoes_security_definer"] = sum(1 for fn in funcs.values() if fn["secdef"])
+        if supa:
+            sig["consulta_de_permissoes"] = "references/stacks/baas.md → Supabase → Consulta de permissões (só leitura)"
+
+    def scan_supabase_api_config(self):
+        cfg = next((f for f in self.files if f.rel.endswith("supabase/config.toml")), None)
+        if not cfg:
+            return
+        sec = re.search(r"(?ms)^\[api\][ \t]*$(.*?)(?=^\[[\w.\-]+\][ \t]*$|\Z)", cfg.text)
+        m = re.search(r"(?m)^[ \t]*auto_expose_new_tables[ \t]*=[ \t]*true\b", sec.group(1)) if sec else None
+        if m:
+            n = cfg.lineno(sec.start(1) + m.start())
+            self.add("C04", "auto_expose_ligado", cfg, n, cfg.line(n), "media",
+                     "[api] auto_expose_new_tables = true: toda tabela, view, sequence e função nova no public nasce acessível pela "
+                     "Data API. O Supabase remove essa opção em 30/10/2026; passe a dar GRANT por tabela na migration, junto com a RLS.")
+
+    def scan_firebase_rules(self):
         # Firebase
         for f in self.files:
             if f.name.endswith(".rules") or f.name in ("firestore.rules", "storage.rules"):
@@ -1437,14 +2091,6 @@ class Scanner:
                              "PocketBase: regra só exige estar logado, sem checar o dono do registro")
         R("C07", "clerk_unsafe_metadata_papel", r"unsafeMetadata\??\.\s*(?:role|isAdmin|is_admin|plan|tier)", self.files, "alta",
           "Clerk unsafeMetadata é editável pelo próprio usuário: papel/plano vai em publicMetadata/privateMetadata")
-        if self.stack.get("supabase"):
-            sql = [f for f in self.files if f.ext == ".sql"]
-            R("C04", "security_definer", r"security\s+definer", sql, "baixa",
-              "Função security definer ignora RLS — se exposta via RPC, cheque auth.uid() dentro e fixe search_path", flags=re.I)
-            R("C04", "view_sem_security_invoker", r"create\s+(?:or\s+replace\s+)?view\s+(?:public\.)?\w+(?![^;]*security_invoker)", sql, "baixa",
-              "View no schema public sem security_invoker: ignora o RLS das tabelas", flags=re.I)
-            R("C04", "grant_para_anon", r"grant\s+(?:all|insert|update|delete)[^;]*\bto\s+anon\b", sql, "media",
-              "GRANT de escrita para o papel anon", flags=re.I)
 
     # -- C08 mass assignment -----------------------------------------------------
     def scan_mass_assignment(self):
@@ -1601,7 +2247,7 @@ class Scanner:
         sqlkw = re.compile(r"\b(select|insert|update|delete|where|from|values|order\s+by)\b", re.I)
         for f in code:
             for m in re.finditer(r"\.(?:query|execute|raw|exec|unsafe|prepare|run|all|get)\(\s*`\s*((?:select|insert|update|delete|with|merge|replace|upsert)\b[^`]{0,800}?)\$\{",
-                                 f.text, re.I):
+                                 f.code, re.I):
                 if sqlkw.search(m.group(1)):
                     n = f.lineno(m.start())
                     self.add("C13", "sql_template_interpolado", f, n, f.line(n), "alta", "SQL montado com interpolação de template string")
@@ -1612,8 +2258,8 @@ class Scanner:
         ]
         for f in code:
             for decl, call in var_sql:
-                for m in re.finditer(decl, f.text, re.I):
-                    if re.search(call % re.escape(m.group(1)), f.text[m.end(): m.end() + 3000]):
+                for m in re.finditer(decl, f.code, re.I):
+                    if re.search(call % re.escape(m.group(1)), f.code[m.end(): m.end() + 3000]):
                         n = f.lineno(m.start())
                         self.add("C13", "sql_montado_em_variavel", f, n, f.line(n), "alta",
                                  f"SQL montado com interpolação na variável '{m.group(1)}' e executado depois")
@@ -1671,8 +2317,8 @@ class Scanner:
         ):
             pattern = re.compile(rx)
             for f in code:
-                sanitized = bool(re.search(r"DOMPurify|sanitize|sanitizeHtml|xss\(|bleach|rehype-sanitize", f.text))
-                for m in pattern.finditer(f.text):
+                sanitized = bool(re.search(r"DOMPurify|sanitize|sanitizeHtml|xss\(|bleach|rehype-sanitize", f.code))
+                for m in pattern.finditer(f.code):
                     n = f.lineno(m.start())
                     ln = f.line(n)
                     if skip and re.search(skip, ln):
@@ -1760,17 +2406,17 @@ class Scanner:
     def scan_responses(self):
         server = self.server_code()
         for f in server:
-            for m in re.finditer(r"\.findMany\(", f.text):
+            for m in re.finditer(r"\.findMany\(", f.code):
                 n = f.lineno(m.start())
                 if not re.search(r"\btake\s*:", f.window(n, 0, 12)):
                     self.add("C17", "findmany_sem_take", f, n, f.line(n), "baixa", "findMany sem take (listagem sem limite)")
-            for m in re.finditer(r"\.select\(\s*['\"]\*['\"]\s*\)", f.text):
+            for m in re.finditer(r"\.select\(\s*['\"]\*['\"]\s*\)", f.code):
                 n = f.lineno(m.start())
                 if re.search(r"\.(?:range|limit|single|maybeSingle)\(", f.window(n, 2, 6)):
                     self.add("C17", "select_estrela", f, n, f.line(n), "baixa", "select('*') devolve todas as colunas — confira se há campo sensível na resposta")
                 else:
                     self.add("C17", "select_estrela_sem_limite", f, n, f.line(n), "media", "select('*') sem limite — todas as colunas e todas as linhas")
-            for m in re.finditer(r"(?i)['\"`]\s*SELECT\s+\*\s+FROM\b[^'\"`]*['\"`]", f.text):
+            for m in re.finditer(r"(?i)['\"`]\s*SELECT\s+\*\s+FROM\b[^'\"`]*['\"`]", f.code):
                 n = f.lineno(m.start())
                 if not re.search(r"(?i)\blimit\b|\bwhere\s+\w*id\s*=", m.group(0)):
                     self.add("C17", "sql_select_estrela_sem_limit", f, n, f.line(n), "baixa", "SELECT * sem LIMIT — todas as colunas e linhas")
@@ -1910,7 +2556,7 @@ class Scanner:
         for f in self.client_code():
             if TEST_PATH_RX.search(f.rel):
                 continue
-            for m in re.finditer(r"['\"`]https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^'\"`]*['\"`]", f.text):
+            for m in re.finditer(r"['\"`]https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^'\"`]*['\"`]", f.code):
                 n = f.lineno(m.start())
                 ln = f.line(n)
                 if re.search(r"process\.env|import\.meta\.env|__DEV__|isDev|development", ln):
@@ -1977,9 +2623,45 @@ class Scanner:
         for f in self.files:
             if f.kind == "env" and is_env_example(f.name) and re.search(r"(?m)^\s*MAIL_MAILER\s*=\s*log\b", f.text):
                 self.add("P06", "laravel_mail_log", f, None, None, "baixa", "MAIL_MAILER=log no exemplo: confira o provedor de e-mail no ambiente de produção")
-        # P07 — LGPD
-        legal = [p for p in paths if re.search(r"(privacidade|privacy|politica|termos|terms|tos|cookies|lgpd|legal)", p, re.I)] + \
-                [f.rel for f in code if re.search(r"['\"`]/(?:politica-de-privacidade|privacidade|privacy|termos|termos-de-uso|terms)['\"`]", f.text)]
+        # P07 — LGPD. Página que existe (arquivo, rota ou link externo) é diferente de link para página: aceite de termos
+        # que levam a um 404 não informa nada ao titular.
+        conceito = {"privacidade": "privacidade", "privacy": "privacidade", "politica": "privacidade", "lgpd": "privacidade",
+                    "termos": "termos", "terms": "termos"}
+        chave = r"(privacidade|privacy|politica|lgpd|termos|terms)"
+
+        def conceitos_em(txt):
+            t = re.sub(r"(?<=[a-z])(?=[A-Z])", "-", txt).lower().replace("í", "i")
+            return {conceito[m.group(1)] for m in re.finditer(r"(?:^|[^a-z])" + chave, t)}
+        nao_pagina = re.compile(r"(?i)checkbox|aceite|accept|consent|banner|modal|dialog|link|footer|rodape|button|botao|toggle|switch")
+        ext_pagina = re.compile(r"\.(?:[cm]?[jt]sx?|vue|svelte|astro|mdx?|html?|php|erb|cshtml|razor|py|rb|hbs|njk|liquid)$", re.I)
+        paginas, tem = [], set()
+        for p in paths:
+            base = p.rsplit("/", 1)[-1]
+            if not ext_pagina.search(base) or TEST_PATH_RX.search(p) or nao_pagina.search(base):
+                continue
+            achou = conceitos_em(re.sub(r"\.[\w.]+$", "", base))
+            for d in p.split("/")[:-1]:
+                achou |= conceitos_em(d) | ({"privacidade", "termos"} if d.lower() == "legal" else set())
+            if achou:
+                paginas.append(p)
+                tem |= achou
+        rota_rx = re.compile(r"""(?:\bpath\s*[:=(]\s*|\bpath=\s*\{?\s*|createFileRoute\(\s*|Route::(?:get|view|any|match)\(\s*|\bget\s+|\bpath\(\s*)"""
+                             r"""['"`]/?((?:[\w-]+/)*[\w-]*""" + chave + r"""[\w-]*)/?['"`]""", re.I)
+        link_rx = re.compile(r"""['"`](/(?:[\w-]+/)*[\w-]*""" + chave + r"""[\w-]*)/?['"`]""", re.I)
+        externo_rx = re.compile(r"""https?://[^'"`\s)]*""" + chave, re.I)
+        links, fora = [], set()
+        for f in code + [x for x in self.files if x.ext in (".html", ".htm")]:
+            t = f.code
+            for m in rota_rx.finditer(t):
+                fora |= conceitos_em(m.group(1))
+            for m in externo_rx.finditer(t):
+                fora |= conceitos_em(m.group(0).split("//", 1)[-1])
+            for m in link_rx.finditer(t):
+                if not re.match(r"/(?:api|rest|v\d+|functions|graphql|trpc|auth|storage|_next|static|assets)/", m.group(1), re.I):
+                    links.append((m.group(1), f, f.lineno(m.start())))
+        tem |= fora
+        faltando = [(p, f, n) for p, f, n in links if conceitos_em(p) - tem]
+        legal = paginas + ([f"rota ou link externo ({', '.join(sorted(fora))})"] if fora else [])
         trackers_rx = {"Google Analytics/Tag Manager": r"gtag\(|googletagmanager\.com|google-analytics\.com|@next/third-parties|react-ga4",
                        "Meta Pixel": r"fbq\(|connect\.facebook\.net", "Hotjar": r"hotjar", "Microsoft Clarity": r"clarity\.ms",
                        "TikTok Pixel": r"analytics\.tiktok\.com|ttq\.", "LinkedIn Insight": r"snap\.licdn\.com",
@@ -1992,9 +2674,17 @@ class Scanner:
                                                        r"auth\.admin\.deleteUser|accounts?/delete|destroyAccount", f.text, re.I)]
         sig["P07"].update({"paginas_legais": sorted(set(legal))[:10], "rastreadores": trackers, "consentimento_em": consent[:5],
                            "exclusao_de_conta_em": delete_flow[:5]})
+        if faltando:
+            sig["P07"]["links_sem_pagina"] = sorted({p for p, _f, _n in faltando})[:10]
         has_users = bool(self.signals["C10"].get("auth_gerenciada")) or any(r.get("tipo") for r in self.routes) and any(
             re.search(r"signUp|register|cadastro|login", f.text) for f in code[:3000])
-        if has_users and not legal:
+        if faltando:
+            p, f, n = faltando[0]
+            self.add("P07", "link_legal_sem_pagina", f, n, f.line(n), "media",
+                     f"O app aponta para {p}, mas não achei a página nem a rota: o link dá 404, e aceite de termos que o titular não "
+                     "consegue ler não vale (LGPD art. 9º, § 1º)" + (f". Outros: {', '.join(sorted({x for x, *_ in faltando[1:]})[:5])}"
+                                                                   if len({x for x, *_ in faltando}) > 1 else ""))
+        elif has_users and not tem:
             self.add("P07", "sem_politica_de_privacidade", None, None, None, "media",
                      "O app coleta dados de usuários e não há página de política de privacidade/termos aparente (LGPD art. 9º)")
         if trackers and not consent:
@@ -2177,25 +2867,29 @@ class Scanner:
                      "Auditoria de dependências não executada (--no-audit, sem rede ou ferramenta ausente) — rode npm audit/pip-audit")
             self.avisos.append("Auditoria de dependências não executada")
 
+    JS_AUDITORIAS = (  # lockfile, ferramenta, comando só de produção, comando completo (para separar o que é só de dev)
+        ("package-lock.json", "npm", ["npm", "audit", "--json", "--omit=dev"], ["npm", "audit", "--json"]),
+        ("pnpm-lock.yaml", "pnpm", ["pnpm", "audit", "--json", "--prod"], ["pnpm", "audit", "--json"]),
+        ("yarn.lock", "yarn", ["yarn", "audit", "--json", "--groups", "dependencies"], ["yarn", "audit", "--json"]),
+        ("bun.lock", "bun", ["bun", "audit", "--json", "--prod"], ["bun", "audit", "--json"]),
+        ("bun.lockb", "bun", ["bun", "audit", "--json", "--prod"], ["bun", "audit", "--json"]),
+    )
+
     def run_audits(self, locks, has_py):
         audits = {}
-        if "package-lock.json" in locks and shutil.which("npm"):
-            rc, out, err = run(["npm", "audit", "--json", "--omit=dev"], self.root, 150)
-            audits["npm"] = self.parse_npm_audit(out, rc, err)
-        elif "pnpm-lock.yaml" in locks and shutil.which("pnpm"):
-            rc, out, err = run(["pnpm", "audit", "--json", "--prod"], self.root, 150)
-            audits["pnpm"] = self.parse_npm_audit(out, rc, err)
-        elif "yarn.lock" in locks and shutil.which("yarn"):
-            rc, out, err = run(["yarn", "audit", "--json", "--groups", "dependencies"], self.root, 150)
-            counts = {}
-            for ln in out.splitlines():
-                try:
-                    o = json.loads(ln)
-                    if o.get("type") == "auditSummary":
-                        counts = o["data"]["vulnerabilities"]
-                except Exception:
-                    continue
-            audits["yarn"] = {"executado": bool(counts), "vulnerabilidades": counts} if counts else {"executado": False, "erro": (err or out)[:300]}
+        js = next((x for x in self.JS_AUDITORIAS if x[0] in locks and shutil.which(x[1])), None)
+        if js:
+            _lk, tool, prod, completo = js
+            rc, out, err = run(prod, self.root, 150)
+            a = self.parse_js_audit(out, rc, err)
+            a["comando"] = " ".join(prod)
+            if a.get("executado"):
+                rc2, out2, err2 = run(completo, self.root, 150)
+                b = self.parse_js_audit(out2, rc2, err2)
+                if b.get("executado"):
+                    ja = {x["pacote"] for x in a["achados"]}
+                    a["so_dev"] = [x for x in b["achados"] if x["pacote"] not in ja]
+            audits[tool] = a
         req = next((p for p in ("requirements.txt", "requirements/prod.txt", "requirements/base.txt") if (self.root / p).exists()), None)
         if has_py and req and shutil.which("pip-audit"):
             cmd = ["pip-audit", "-f", "json", "-r", req]
@@ -2243,6 +2937,10 @@ class Scanner:
             self.tools[tool] = bool(shutil.which(tool))
         self.signals["C20"]["auditoria"] = audits
         for name, a in audits.items():
+            if name in ("npm", "pnpm", "yarn", "bun"):
+                if a.get("executado"):
+                    self.decidir_auditoria_js(a)
+                continue
             v = a.get("vulnerabilidades") or {}
             crit, high = int(v.get("critical", 0) or 0), int(v.get("high", 0) or 0)
             if crit or high:
@@ -2258,23 +2956,154 @@ class Scanner:
                 self.add("C20", "vulnerabilidades_" + name.replace("-", "_"), None, None, None, "alta",
                          f"{name}: {a['total']} vulnerabilidade(s) conhecida(s) — rode a ferramenta para ver a lista")
 
-    @staticmethod
-    def parse_npm_audit(out, rc, err):
+    SEV_ORDEM = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "info": 0}
+
+    @classmethod
+    def parse_js_audit(cls, out, rc, err):
+        """npm (7+ e 6), pnpm, yarn 1 e bun → {executado, vulnerabilidades, achados: [{pacote, severidade, raizes}], pacotes}.
+        'raizes' são as dependências diretas que puxam o pacote vulnerável (é por elas que se sabe se vai para produção)."""
+        txt = (out or "").strip()
+        if not txt:
+            return {"executado": False, "erro": (err or "sem saída")[:300]}
+        achados, counts = {}, {}
+
+        def add(pkg, sev, raizes):
+            if not pkg:
+                return
+            atual = achados.get(pkg)
+            if not atual or cls.SEV_ORDEM.get(sev, 0) > cls.SEV_ORDEM.get(atual["severidade"], 0):
+                achados[pkg] = {"pacote": pkg, "severidade": sev or "unknown", "raizes": set(raizes) | (atual["raizes"] if atual else set())}
+            else:
+                atual["raizes"] |= set(raizes)
+
+        def raiz_do_caminho(c):
+            partes = [x for x in c.split(">") if x]
+            if partes and (partes[0] == "." or "__" in partes[0]) and len(partes) > 1:
+                partes = partes[1:]  # pnpm põe o importador (raiz ou pasta do workspace) na frente
+            return partes[0] if partes else ""
+
         try:
-            data = json.loads(out)
+            data = json.loads(txt)
         except Exception:
-            return {"executado": False, "erro": (err or out or "sem saída")[:300]}
-        if "error" in data and "metadata" not in data:
-            return {"executado": False, "erro": json.dumps(data["error"])[:300]}
-        meta = (data.get("metadata") or {}).get("vulnerabilities") or {}
-        pkgs = []
-        for name, info in (data.get("vulnerabilities") or {}).items():
-            if info.get("severity") in ("critical", "high"):
-                pkgs.append(f"{name} ({info.get('severity')})")
-        for _id, adv in (data.get("advisories") or {}).items():  # formato antigo / pnpm
-            if adv.get("severity") in ("critical", "high"):
-                pkgs.append(f"{adv.get('module_name')} ({adv.get('severity')})")
-        return {"executado": True, "vulnerabilidades": meta, "pacotes": sorted(set(pkgs))[:20]}
+            data = None
+        if isinstance(data, dict) and data.get("type") in ("auditSummary", "auditAdvisory", "info", "warning"):
+            data = None  # yarn 1 com uma linha só
+        if data is None:  # yarn 1: um JSON por linha
+            for ln in txt.splitlines():
+                try:
+                    o = json.loads(ln)
+                except Exception:
+                    continue
+                if not isinstance(o, dict):
+                    continue
+                if o.get("type") == "auditSummary":
+                    counts = (o.get("data") or {}).get("vulnerabilities") or {}
+                elif o.get("type") == "auditAdvisory":
+                    adv = (o.get("data") or {}).get("advisory") or {}
+                    caminhos = [p for fi in adv.get("findings") or [] for p in fi.get("paths") or []]
+                    add(adv.get("module_name"), adv.get("severity"), [raiz_do_caminho(c) for c in caminhos])
+            if not counts and not achados:
+                return {"executado": False, "erro": (err or txt)[:300]}
+        elif isinstance(data, dict) and isinstance(data.get("vulnerabilities"), dict):  # npm 7+
+            vul = data["vulnerabilities"]
+
+            def raizes(nome):
+                fila, vistos, out = [nome], {nome}, []
+                while fila:
+                    k = fila.pop()
+                    v = vul.get(k) or {}
+                    if v.get("isDirect"):
+                        out.append(k)
+                    for e in v.get("effects") or []:
+                        if e not in vistos:
+                            vistos.add(e)
+                            fila.append(e)
+                return out
+            for nome, info in vul.items():
+                if isinstance(info, dict) and any(isinstance(x, dict) for x in info.get("via") or []):
+                    add(nome, info.get("severity"), raizes(nome))  # só quem tem o aviso, não quem depende dele
+            counts = (data.get("metadata") or {}).get("vulnerabilities") or {}
+        elif isinstance(data, dict) and isinstance(data.get("advisories"), dict):  # npm 6 e pnpm
+            for adv in data["advisories"].values():
+                if isinstance(adv, dict):
+                    caminhos = [p for fi in adv.get("findings") or [] for p in fi.get("paths") or []]
+                    add(adv.get("module_name"), adv.get("severity"), [raiz_do_caminho(c) for c in caminhos])
+            counts = (data.get("metadata") or {}).get("vulnerabilities") or {}
+        elif isinstance(data, dict) and "error" in data and "metadata" not in data:
+            return {"executado": False, "erro": json.dumps(data["error"], ensure_ascii=False)[:300]}
+        elif isinstance(data, dict) and all(isinstance(v, list) for v in data.values()):  # bun: resposta crua do registro
+            for pkg, lst in data.items():
+                for adv in lst:
+                    if isinstance(adv, dict):
+                        add(pkg, adv.get("severity"), [])
+            for x in achados.values():
+                counts[x["severidade"]] = counts.get(x["severidade"], 0) + 1
+        else:
+            return {"executado": False, "erro": txt[:300]}
+        lista = sorted(({**x, "raizes": sorted(r for r in x["raizes"] if r)} for x in achados.values()),
+                       key=lambda x: (-cls.SEV_ORDEM.get(x["severidade"], 0), x["pacote"]))
+        return {"executado": True, "vulnerabilidades": counts, "achados": lista,
+                "pacotes": [f"{x['pacote']} ({x['severidade']})" for x in lista if x["severidade"] in ("critical", "high")][:20]}
+
+    def uso_da_dependencia(self, pkg):
+        """'producao' se o código do app importa o pacote; 'build' se só a config do build, scripts e testes usam
+        (ou é ferramenta de build conhecida); None quando não deu para saber."""
+        if pkg in self._uso_cache:
+            return self._uso_cache[pkg]
+        rx = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"]%s(?:/[^'"]*)?['"]""" % re.escape(pkg))
+        onde = set()
+        for f in self.code():
+            if pkg in f.text and rx.search(f.code):
+                onde.add("build" if TEST_PATH_RX.search(f.rel) or ARQUIVO_DE_BUILD_RX.search(f.rel) else "producao")
+        if "producao" in onde:
+            r = "producao"
+        elif onde or FERRAMENTA_DE_BUILD_RX.match(pkg):
+            r = "build"
+        else:
+            curto = pkg.rsplit("/", 1)[-1]
+            r = "build" if any(re.search(r"(?:^|[\s;&|(])%s(?:\s|$)" % re.escape(curto), v) for v in self.pkg_scripts.values()) else None
+        self._uso_cache[pkg] = r
+        return r
+
+    def decidir_auditoria_js(self, a):
+        """Separa o que vai para produção do que só roda no build e do que é só de dev, e decide a confiança de cada um."""
+        alta_sev = ("critical", "high")
+        prod, build = [], []
+        for x in a.get("achados") or []:
+            if x["severidade"] not in alta_sev:
+                continue
+            raizes = x["raizes"] or ([x["pacote"]] if x["pacote"] in self.deps else [])
+            usos = {self.uso_da_dependencia(r) for r in raizes}
+            x["uso"] = "build" if raizes and usos == {"build"} else "producao" if "producao" in usos else "desconhecido"
+            (build if x["uso"] == "build" else prod).append(x)
+
+        def fmt(lst):
+            itens = []
+            for x in lst[:8]:
+                via = [r for r in x["raizes"] if r != x["pacote"]][:2]
+                itens.append(f"{x['pacote']} ({x['severidade']}" + (f" via {'/'.join(via)}" if via else "") + ")")
+            return ", ".join(itens) + ("…" if len(lst) > 8 else "")
+        cmd = a.get("comando", "audit")
+        if prod:
+            crit = sum(1 for x in prod if x["severidade"] == "critical")
+            self.add("C20", "vulnerabilidades_altas", None, None, None, "alta",
+                     f"`{cmd}`: {crit} crítica(s) e {len(prod) - crit} alta(s) em dependências de produção: {fmt(prod)}")
+        if build:
+            self.add("C20", "vulnerabilidades_so_no_build", None, None, None, "media",
+                     f"`{cmd}` acusou alta/crítica em pacote que só roda no build, nos testes ou nas ferramentas ({fmt(build)}): ele não "
+                     "vai para o navegador nem para o servidor. Atualize quando puder e, se estiver em dependencies, mova para devDependencies.")
+        mod = [x for x in a.get("achados") or [] if x["severidade"] == "moderate"]
+        if not prod and not build and mod:
+            self.add("C20", "vulnerabilidades_moderadas", None, None, None, "baixa", f"`{cmd}`: {len(mod)} moderada(s): {fmt(mod)}")
+        dev = [x for x in a.get("so_dev") or [] if x["severidade"] in alta_sev]
+        if dev:
+            self.add("C20", "vulnerabilidades_so_dev", None, None, None, "baixa",
+                     f"{len(dev)} pacote(s) com alta/crítica só em devDependencies ({fmt(dev)}): ficam na máquina de quem desenvolve e no "
+                     "CI, não no app publicado. Atualize na rotina.")
+        a["decisao"] = {"producao": [f"{x['pacote']} ({x['uso']})" for x in prod], "so_build": [x["pacote"] for x in build],
+                        "so_dev": [x["pacote"] for x in dev]}
+        a["achados"] = (a.get("achados") or [])[:40]
+        a["so_dev"] = (a.get("so_dev") or [])[:40]
 
     # -- consolidação ------------------------------------------------------------------
     SEMANTIC = {"C06", "C07", "C08", "C14", "C17"}
@@ -2332,6 +3161,7 @@ class Scanner:
         except Exception as e:  # pragma: no cover
             autoria = {"erro": f"{type(e).__name__}: {e}"}
         autoria["creditos_intactos"] = creditos_intactos()
+        cobertura = self.resumo_zonas()
         conf_rank = {"alta": 0, "media": 1, "baixa": 2}
         result = {
             "ferramenta": f"check-pre-lancamento/scan.py {VERSION}",
@@ -2341,6 +3171,7 @@ class Scanner:
             "duracao_s": round(time.time() - t0, 1),
             "arquivos_analisados": len(self.files),
             "arquivos_ignorados": self.skipped,
+            "cobertura_do_scan": cobertura,
             "stack": sorted(self.stack.keys()),
             "plataforma": self.platform,
             "rotas_encontradas": len(self.routes),
@@ -2378,7 +3209,7 @@ def print_summary(res):
     if res["erros_do_scanner"]:
         print("erros do scanner:", *res["erros_do_scanner"], sep="\n  ")
     if res.get("avisos"):
-        print("avisos de cobertura (levar para 'limitacoes'):", *res["avisos"], sep="\n  ")
+        print("avisos de cobertura (levar para 'limitacoes' e 'cobertura'):", *res["avisos"], sep="\n  ")
     for group, title in (("checks", "Segurança (20)"), ("prontidao", "Prontidão para o lançamento (10)")):
         print(f"\n{title}")
         for cid, c in res[group].items():
@@ -2393,7 +3224,12 @@ def main():
     ap.add_argument("root", nargs="?", default=".")
     ap.add_argument("--out", help="caminho do JSON de saída (padrão: <raiz>/check-report/scan.json)")
     ap.add_argument("--no-git-history", action="store_true", help="não varre o histórico do git (mais rápido)")
-    ap.add_argument("--no-audit", action="store_true", help="não roda npm/pnpm/yarn/pip audit (sem rede)")
+    ap.add_argument("--no-audit", action="store_true", help="não roda npm/pnpm/yarn/bun/pip audit (sem rede)")
+    ap.add_argument("--ignorar", "--ignore", action="append", metavar="PADRAO",
+                    help="pasta ou padrão do .gitignore fora das regras de código (repete ou separa por vírgula); "
+                         "segredos continuam sendo procurados. Também lê " + ARQUIVO_IGNORAR + " na raiz")
+    ap.add_argument("--varrer-tudo", "--all-files", dest="varrer_tudo", action="store_true",
+                    help="não respeita .gitignore, pastas fora do build (docs/, examples/) nem --ignorar")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
     root = Path(args.root).resolve()

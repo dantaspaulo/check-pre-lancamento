@@ -189,8 +189,19 @@ Use o admin só quando precisar ignorar RLS de propósito (webhooks, jobs), semp
 
 **O que é:** com a chave pública no front (C03), quem protege os dados é o Row Level Security (Supabase/Postgres) ou as Security Rules (Firebase). Tabela sem RLS = qualquer pessoa com a anon key (que está no seu site) lê e escreve tudo. É a falha nº 1 de apps feitos com Lovable/Bolt/Supabase.
 
+**Duas camadas, não uma.** O GRANT decide se o papel (`anon` = visitante sem login, `authenticated` = qualquer conta logada) pode rodar SELECT, INSERT, UPDATE ou DELETE na tabela. A RLS decide quais linhas ele vê. Até 30/10/2026, todo projeto Supabase antigo dava SELECT, INSERT, UPDATE e DELETE para `anon` e `authenticated` em toda tabela nova do `public`, e a RLS era a única barreira: sem margem de erro, uma policy errada vira vazamento. A partir de 30/10/2026 a tabela nova nasce sem GRANT (em projeto criado depois de 30/05/2026, já era assim; as tabelas antigas continuam com o que tinham; fonte: [changelog do Supabase](https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically)). Quem receber o erro 42501 vai cair na tentação do GRANT em massa, que reabre tudo.
+
 **Como detectar:**
-- Scanner: em `supabase/migrations/*.sql` e outros `.sql`, tabelas criadas sem `enable row level security`, `disable row level security`, policies com `using (true)` / `with check (true)`; em `firestore.rules`/`storage.rules`/`database.rules.json`, `allow read, write: if true`, regra de "modo de teste" (`request.time < timestamp.date(...)`), `".read": true` na raiz.
+- Scanner (lê as migrations comando por comando, na ordem, sem comentários):
+  - tabelas sem `enable row level security` (`tabela_sem_rls`) e `disable row level security` (`rls_desativado`);
+  - policies abertas separadas por público: `policy_publica_leitura` e `policy_publica_escrita` (sem `to` ou `to anon`/`public`: visitante sem login) e `policy_qualquer_logado_leitura` e `policy_qualquer_logado_escrita` (`to authenticated using (true)` ou só `auth.uid() is not null`). Leitura de tabela com nome de catálogo (CID, CBHPM, TUSS, estados, categorias, planos) cai para confiança baixa; com nome de dado de usuário (perfis, pacientes, pedidos, mensagens, documentos) sobe;
+  - `anon_com_escrita`: o anon recebe INSERT/UPDATE/DELETE por GRANT (comum em schema exportado por `supabase db pull`, que escreve um GRANT por tabela);
+  - `grant_em_massa_tabelas` e `grant_execute_em_massa`: `grant ... on all tables/functions in schema public`;
+  - `privilegio_padrao_aberto`: `alter default privileges ... grant` para anon/authenticated, que abre todo objeto novo;
+  - `funcao_security_definer_exposta`: função `security definer` no `public` que o visitante chama por `/rest/v1/rpc/<nome>`, incluindo o caso de quem revogou só do `anon` (o `anon` herda de `PUBLIC`, que tem EXECUTE por padrão), e `security_definer_sem_search_path`;
+  - `view_ignora_rls` (view sem `security_invoker`), `view_materializada_exposta`, `auto_expose_ligado` (`[api] auto_expose_new_tables = true` no `supabase/config.toml`) e `permissoes_do_banco_nao_verificadas` (migrations sem nenhum GRANT ou REVOKE: o estado real só aparece no banco);
+  - Firebase: em `firestore.rules`/`storage.rules`/`database.rules.json`, `allow read, write: if true`, regra de "modo de teste" (`request.time < timestamp.date(...)`), `".read": true` na raiz.
+- O que as migrations não mostram, só o banco mostra: os GRANTs que o Supabase deu sozinho, o que foi mudado pelo painel e o estado depois de 30/10. Rode as consultas de `references/stacks/baas.md` → "Consulta de permissões" (só leitura): pelo MCP/conector do Supabase, se houver, ou peça ao usuário para rodar no SQL Editor e colar o resultado.
 - Se não houver migrations no repo, o estado real está só no banco. Opções:
   - Se houver MCP do Supabase conectado, use-o para rodar as queries abaixo (somente leitura).
   - Senão, peça ao usuário rodar no SQL Editor e colar o resultado:
@@ -202,13 +213,17 @@ select tablename, policyname, cmd, roles, qual, with_check from pg_policies wher
 -- buckets públicos do Storage
 select id, public from storage.buckets;
 ```
-- Revise cada policy: `using (true)` em SELECT pode ser intencional (catálogo público); em INSERT/UPDATE/DELETE para `anon`/`authenticated` quase nunca é.
+- Revise cada policy pelo público e pela operação:
+  - `using (true)` em SELECT `to authenticated` numa tabela de catálogo (CID, CBHPM, lista de especialidades): normalmente OK, porque é dado de referência que todo usuário vê;
+  - o mesmo para `anon` ou sem `to`: leitura pública sem login, OK só se a tabela não tem nada de usuário;
+  - INSERT `to anon` com `with check (true)` em formulário público (contato, lista de espera): aceitável com captcha ou rate limit e sem leitura pública da tabela;
+  - UPDATE, DELETE ou `for all` com `true`, para `anon` ou `authenticated`: quase nunca é intencional (qualquer conta altera a linha das outras).
 - Outros back-ends gerenciados entram aqui também: **PocketBase** (API rule vazia `""` = pública; `null` = só superusuário), **Appwrite** (permissões com `Role.any()` em escrita), **Convex** (não tem RLS: a autorização fica dentro de cada função — ver C06), **Bubble** (privacy rules). Ver `references/stacks/baas.md`.
 - Com a URL publicada e o OK do dono, `check_url.py --sondar-dados` usa a chave pública do próprio site para contar quantas linhas cada tabela do Supabase devolve sem login e testar Firestore/Realtime DB/Storage. É a prova mais forte desta checagem.
 
-**FALHA:** tabela com dados de usuário sem RLS; policy permissiva em escrita; Firebase em modo teste/`if true`.
-**ATENÇÃO:** não foi possível verificar (sem migrations e sem acesso ao banco) — marque e deixe a query acima como ação manual; policy `using (true)` em leitura de tabela que pode ter dado sensível.
-**OK:** todas as tabelas do schema exposto com RLS e policies por dono (`auth.uid()`), revisadas.
+**FALHA:** tabela com dados de usuário sem RLS; policy permissiva em escrita; leitura aberta (pública ou de qualquer conta) em tabela com dado de usuário; função `security definer` que apaga ou altera dado chamável sem login; GRANT em massa para `anon`; Firebase em modo teste/`if true`.
+**ATENÇÃO:** não foi possível verificar (sem migrations e sem acesso ao banco) — marque e deixe a consulta de permissões como ação manual; `anon` com INSERT/UPDATE/DELETE por GRANT em tabelas com RLS (a RLS segura, mas sem margem de erro); privilégio padrão que abre todo objeto novo; view sem `security_invoker`; policy `using (true)` em leitura de tabela que pode ter dado sensível.
+**OK:** todas as tabelas do schema exposto com RLS e policies por dono (`auth.uid()`), revisadas; `anon` só com o que o visitante precisa (normalmente SELECT em poucas tabelas, ou nada); funções `security definer` fechadas para quem não usa.
 **N/A:** sem Supabase/Firebase/PostgREST e banco não exposto ao cliente. Atenção: Supabase usado "só como Postgres" ainda expõe o schema `public` pela Data API (com a anon key) se ela não foi desativada — aí RLS continua obrigatório; sem saber se a Data API está ligada, é ATENÇÃO.
 
 **Como corrigir:**
@@ -229,6 +244,21 @@ create policy "profiles_insert_own" on public.profiles
 - RLS ligado sem nenhuma policy = ninguém acessa via anon key (seguro por padrão; libere só o necessário).
 - Colunas que o usuário não pode mudar (`role`, `plan`, `credits`): não confie só em RLS por linha — use trigger, coluna em tabela separada ou `revoke update (role) on profiles from authenticated` (ver C08).
 - Views: crie com `with (security_invoker = true)` para respeitarem RLS. Funções `security definer` expostas via RPC ignoram RLS — revise.
+- **GRANT por tabela, nunca em massa.** Tirar do `anon` o que o visitante não usa, e devolver só o necessário, objeto por objeto:
+```sql
+-- antes de mexer: salve o resultado da "Consulta de permissões" (references/stacks/baas.md)
+revoke insert, update, delete, truncate on table public.profiles from anon;
+grant select, insert, update, delete on table public.profiles to authenticated;  -- só se o app escreve logado
+alter table public.profiles enable row level security;
+-- função interna: revogar de public E de anon (o anon herda de PUBLIC); se o app não chama, de authenticated também
+revoke execute on function public.apagar_usuario(uuid) from public, anon, authenticated;
+-- função que o front chama logado (supabase.rpc): só ela, só para authenticated, e ela confere auth.uid() por dentro
+revoke execute on function public.meus_pedidos() from public, anon;
+grant execute on function public.meus_pedidos() to authenticated;
+```
+  - **Cuidado na volta:** depois de revogar o `anon` em massa, não devolva `grant execute on all functions in schema public to authenticated`. As funções internas, fechadas de propósito (as que apagam, mudam papel ou leem tudo), voltam a abrir. Liste as funções que o front chama por `supabase.rpc('...')` e conceda só essas.
+  - Privilégio padrão: `alter default privileges for role postgres in schema public revoke select, insert, update, delete on tables from anon, authenticated;` faz o objeto novo nascer fechado. Ele só vale para objetos criados pelo papel indicado (`for role`).
+  - Teste depois de mudar: um visitante sem login e duas contas diferentes (a A não lê nem altera a linha da B).
 - Firebase:
 ```
 rules_version = '2';
@@ -781,15 +811,20 @@ add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; prelo
 **O que é:** dependências com vulnerabilidade conhecida são o caminho mais fácil de ataque. Precisa de lockfile versionado, auditoria sem vulnerabilidades altas/críticas em produção e atualização automática (Dependabot/Renovate).
 
 **Como detectar:**
-- Scanner: lockfile, Dependabot/Renovate, roda `npm audit`/`pnpm audit`/`yarn audit`/`pip-audit`/`osv-scanner` quando possível (precisa de rede), e checa versões do Next.js afetadas por:
+- Scanner: lockfile, Dependabot/Renovate, roda `npm audit --omit=dev`/`pnpm audit --prod`/`yarn audit --groups dependencies`/`bun audit --prod`/`pip-audit`/`osv-scanner` quando possível (precisa de rede) e separa três grupos:
+  - `vulnerabilidades_altas` (confiança alta): pacote de produção que o código do app importa, ou que não deu para saber;
+  - `vulnerabilidades_so_no_build` (média): pacote em `dependencies` que só a config do build (`vite.config`, `postcss.config`…), os scripts e os testes usam, ou ferramenta de build (vite, esbuild, tailwind, eslint…). Não vai para o navegador nem para o servidor. Acontece quando o pacote de build foi instalado sem `-D`;
+  - `vulnerabilidades_so_dev` (baixa): só em `devDependencies` (roda uma segunda auditoria, completa, para comparar).
+  - A decisão de cada pacote fica em `C20.sinais.auditoria.<ferramenta>.decisao`. Se você rodar a auditoria à mão, use as mesmas flags de produção e separe o que é build e dev antes de dar FALHA.
+- Também checa versões do Next.js afetadas por:
   - **CVE-2025-29927** (bypass de middleware): corrigido em 12.3.5, 13.5.9, 14.2.25, 15.2.3.
   - **CVE-2025-66478 / CVE-2025-55182 "React2Shell"** (RCE, CVSS 10, App Router): Next 15.x/16.x — corrigido em 15.0.5, 15.1.9, 15.2.6, 15.3.6, 15.4.8, 15.5.7, 16.0.7. Se ficou exposto sem patch, a recomendação oficial é rotacionar os segredos do app.
   - **Boletins de 2026** (julho, agosto, 22/set, 30/set e 14/out): RCEs críticas (função `use cache` devolvendo typed arrays, otimização de imagem com SVG/AVIF via sharp, servidor Windows), SSRF na otimização de imagem e cache poisoning. **Mínimo seguro em 27/10/2026: 15.5.28 (Maintenance LTS) e 16.4.1 (Active LTS).** As linhas 13.x e 14.x não recebem mais correção. Fontes: [nextjs.org/blog/nextjs-security-update-october-14-2026](https://nextjs.org/blog/nextjs-security-update-october-14-2026) e [september-2026-security-release](https://nextjs.org/blog/september-2026-security-release). O scanner acusa como `next_boletins_2026` ou `next_linha_sem_suporte`; boletins mais novos aparecem no `npm audit`.
 - Outras linguagens: `composer audit` (PHP), `pip-audit` (Python), `bundle-audit` (Ruby), `govulncheck ./...` (Go), `dotnet list package --vulnerable` (.NET), `mvn org.owasp:dependency-check-maven:check` ou `./gradlew dependencyCheckAnalyze` (Java), e `osv-scanner scan source -r .` para todas de uma vez. O scanner roda as que estiverem instaladas.
 - Se a auditoria não rodou (sem rede/sem npm), deixe o comando como ação manual e marque ATENÇÃO.
 
-**FALHA:** vulnerabilidade crítica/alta em dependência de produção; Next.js numa das faixas acima; sem lockfile.
-**ATENÇÃO:** só moderadas; auditoria não executada; sem Dependabot/Renovate.
+**FALHA:** vulnerabilidade crítica/alta em dependência de produção que o app usa; Next.js numa das faixas acima; sem lockfile.
+**ATENÇÃO:** alta/crítica só em pacote de build ou de dev (o servidor de desenvolvimento e o CI ficam expostos, o app publicado não); só moderadas; auditoria não executada; sem Dependabot/Renovate. Projeto Yarn 2+ (berry): `yarn npm audit --environment production`.
 **OK:** auditoria limpa (ou só baixas/dev) + lockfile + atualização automática.
 
 **Como corrigir:**

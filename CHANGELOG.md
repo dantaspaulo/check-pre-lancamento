@@ -2,6 +2,34 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versões seguem [SemVer](https://semver.org/lang/pt-BR/).
 
+## [2.1.0] · 2026-10-27
+
+Feita a partir do retorno de quem rodou a 2.0.0 num app React + Vite + Supabase + Cloudflare com uns 1.500 arquivos.
+
+### Novo
+- **Prompts para depois da análise:** 15 prompts prontos em [PROMPTS.md](PROMPTS.md) (resolver o que impede o lançamento, trocar chaves, revisar permissões do Supabase, testar se um usuário vê dado de outro, Termos e Privacidade, backup, checklist do lançamento e outros). O `RELATORIO.md` termina com os que combinam com o que foi achado, e o agente aceita o pedido pelo número ("roda o PA04").
+- **Permissões do banco nas migrations (Supabase/PostgREST).** O scanner agora lê as migrations comando por comando, na ordem, e acusa:
+  - `anon` com INSERT/UPDATE/DELETE por GRANT, inclusive no formato do `supabase db pull`;
+  - GRANT em massa (`on all tables`, `on all functions`) e privilégio padrão que abre todo objeto novo;
+  - função `security definer` que o visitante chama por `/rest/v1/rpc`, inclusive quando só o `anon` foi revogado e o `PUBLIC` continua com EXECUTE;
+  - função `security definer` sem `search_path`, view sem `security_invoker`, materialized view exposta e `auto_expose_new_tables = true`;
+  - tabela usada pelo app sem GRANT nas migrations (P04), que quebra num projeto novo a partir da mudança do Supabase de 30/10/2026.
+- **Consulta de permissões (só leitura)** em `references/stacks/baas.md`, para ver o que o `anon` e o `authenticated` podem de fato no banco, com uma receita para tirar acesso do `anon` sem quebrar o app.
+- **Aviso automático no plano de correção:** se uma correção traz GRANT ou REVOKE em massa, `disable row level security`, `drop` ou `truncate`, o `RELATORIO.md` e o `CORRECOES.md` ganham um aviso de cuidado logo abaixo. O plano ganhou a regra de nunca devolver permissão em massa: depois de revogar o `anon`, um `grant execute on all functions` reabre as funções internas fechadas de propósito.
+- **P07:** link para `/termos` ou `/privacidade` sem página nem rota vira `link_legal_sem_pagina` (aceite de texto que não existe não vale, LGPD art. 9º, § 1º).
+- **`bun audit`** para projetos com `bun.lock`/`bun.lockb`.
+- **`--ignorar PASTA`** (ou `--ignore`) e o arquivo `.check-pre-lancamento-ignore`, no formato do `.gitignore`. `--varrer-tudo` volta ao comportamento antigo.
+
+### Mudou
+- **O scanner respeita o `.gitignore`** (pelo `git check-ignore`, ou lendo o arquivo quando a pasta não tem git) e deixa fora das regras de código as pastas `docs/` e `examples/` da raiz. Chave secreta continua sendo procurada em todas essas pastas (no que o git ignora, com confiança baixa: não vai para o repositório, mas vaza se entrar no build), e o que ficou de fora aparece em `cobertura_do_scan` e nos avisos. Uma pasta `docs/` com `index.html`, `CNAME` ou `_config.yml` é tratada como site publicado (GitHub Pages), não como documentação.
+- **Comentário não dispara regra:** o código é lido sem os comentários em JS/TS, Python, PHP, Ruby, SQL, HTML, Vue, Svelte e regras do Firebase. Os números de linha continuam os mesmos.
+- **Policies separadas por público:** `policy_publica_leitura`, `policy_publica_escrita`, `policy_qualquer_logado_leitura` e `policy_qualquer_logado_escrita` substituem `policy_permissiva` e `policy_qualquer_logado`. Leitura de tabela com nome de catálogo (CID, CBHPM, TUSS, estados, categorias) cai para confiança baixa; com nome de dado de usuário, sobe.
+- **C20 separa produção, build e dev:** alta/crítica em pacote que só a config do build, os scripts e os testes usam vira `vulnerabilidades_so_no_build` (média), e o que existe só em `devDependencies` vira `vulnerabilidades_so_dev` (baixa). Antes, um `vite` em `dependencies` derrubava o C20 para FALHA.
+- As regras `security_definer`, `view_sem_security_invoker` e `grant_para_anon` deram lugar às novas regras de permissão.
+
+### Corrigido
+- A página legal contava como existente quando o app só tinha um link para ela, e o padrão `tos` casava com palavras como "photos".
+
 ## [2.0.0] · 2026-10-27
 
 Primeira versão pública.

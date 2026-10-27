@@ -17,6 +17,7 @@
   "preparacao": ["o que precisa estar pronto antes da Task 1, ex.: projeto buildando (opcional)"],
   "acoes_manuais": ["ação manual que não pertence a uma checagem específica (opcional)"],
   "cobertura": ["o que foi olhado e o que ficou de fora, uma linha por item (recomendado)"],
+  "prompts": ["PA04", "PA08"],
   "pasta_relatorio": "check-report",
   "comando_scan": "python3 ~/.claude/skills/check-pre-lancamento/scripts/scan.py . --out check-report/scan.json",
   "checks": [
@@ -56,6 +57,10 @@ O bloco `prontidao` usa os mesmos campos de `checks`, com ids `P01` … `P10` (c
 | `acao_manual` | quando houver | texto |
 
 Campos de topo opcionais: `decisoes_pendentes` aparece no relatório antes do plano e no `CORRECOES.md` como "pergunte antes de começar"; `preparacao` vira a Task 0; `acoes_manuais` entra no checklist manual.
+
+- **`cobertura`**: inclua o que o scanner deixou fora das regras de código (`scan.json → cobertura_do_scan` e a linha "Fora das regras de código" em `avisos`): pastas do `.gitignore`, pastas fora do build (`docs/`, `examples/`) e o que veio de `--ignorar`. Exemplo: "fora das regras de código: arquivos-locais/ e .ds-sync/ (.gitignore), docs/ (fora do build); segredos procurados também em docs/".
+- **`prompts`**: os IDs da biblioteca `references/prompts-pos-analise.md` que vão no fim do `RELATORIO.md`, na ordem. Sem o campo, o `render_report.py` escolhe sozinho pelos itens abertos (até 4 mais o PA14, de conferir de novo).
+- **Cuidados automáticos:** se `correcao` ou `prompt` trouxer GRANT ou REVOKE em massa (`on all tables`, `on all functions`), `disable row level security`, `drop table` ou `truncate`, o relatório e o plano ganham um aviso de cuidado logo abaixo. Prefira escrever a correção objeto por objeto, para o aviso nem precisar aparecer.
 
 **Notas** (calculadas pelo script, uma de segurança e uma de prontidão):
 - Cada item pesa pela severidade **efetiva**: CRÍTICO 10, ALTO 6, MÉDIO 3, BAIXO 1.

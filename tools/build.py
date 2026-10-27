@@ -25,10 +25,22 @@ import autoria  # noqa: E402
 from _common import VERSION  # noqa: E402
 
 LIMITE_ARQUIVO = 1_000_000  # Lovable aceita até 1 MB por arquivo dentro do zip
+PROMPTS_FONTE = SKILL / "references" / "prompts-pos-analise.md"
+PROMPTS_RAIZ = ROOT / "PROMPTS.md"
+
+
+def prompts_da_raiz():
+    """PROMPTS.md da raiz = cópia da biblioteca que vai dentro da skill (fonte única: references/prompts-pos-analise.md)."""
+    corpo = PROMPTS_FONTE.read_text(encoding="utf-8")
+    aviso = ("<!-- Gerado por tools/build.py a partir de skills/check-pre-lancamento/references/prompts-pos-analise.md. "
+             "Edite lá e rode python3 tools/build.py. -->\n")
+    return aviso + corpo
 
 
 def conferir():
     erros = []
+    if not PROMPTS_RAIZ.exists() or PROMPTS_RAIZ.read_text(encoding="utf-8") != prompts_da_raiz():
+        erros.append("PROMPTS.md da raiz fora de sincronia com references/prompts-pos-analise.md: rode python3 tools/build.py")
     r = autoria.verificar()
     if r["sem_credito"]:
         erros.append("arquivos sem crédito de autoria: " + ", ".join(r["sem_credito"]))
@@ -57,6 +69,7 @@ def conferir():
 
 
 def empacotar():
+    PROMPTS_RAIZ.write_text(prompts_da_raiz(), encoding="utf-8")
     autoria.gerar()
     DIST.mkdir(exist_ok=True)
     zip_path = DIST / "check-pre-lancamento.zip"

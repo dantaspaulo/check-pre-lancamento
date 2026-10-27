@@ -1,4 +1,4 @@
-<!-- check-pre-lancamento v2.0.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · CPL-PSD-2026 -->
+<!-- check-pre-lancamento v2.1.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · CPL-PSD-2026 -->
 # Check pré-lançamento · AgendaFácil (exemplo fictício)
 
 **Data:** 2026-10-27  
@@ -310,6 +310,85 @@ Em index.html troque o title para "AgendaFácil · agenda online para clínicas"
 3. Faça o checklist manual (o que o agente não pode fazer por você).
 4. Rode o check de novo para confirmar que tudo virou ✅.
 
+## Prompts prontos para o próximo passo
+
+Copie e cole no seu agente, aberto na pasta do projeto. No claude.ai ou em outro chat, anexe antes este relatório e o `CORRECOES.md`. A lista completa está em [PROMPTS.md](https://github.com/dantaspaulo/check-pre-lancamento/blob/main/PROMPTS.md).
+
+### PA01 · Resolver primeiro o que impede o lançamento
+
+**Quando usar:** o veredito saiu 🔴 ou há falha crítica. Resolve hoje só o que derruba o lançamento.
+
+```text
+Leia check-report/RELATORIO.md e check-report/CORRECOES.md. Hoje quero resolver só o que impede o lançamento: os itens 🔴 Críticos e as ações urgentes fora do código.
+1. Liste esses itens em ordem de risco, cada um com uma frase dizendo o que um atacante consegue fazer.
+2. Para cada chave exposta, me passe o passo a passo para gerar uma nova e revogar a antiga no painel do provedor. Eu faço essa parte: você não toca em chave real e nunca escreve o valor de uma chave no chat, em código ou em commit.
+3. Corrija no código só esses itens, um por vez, seguindo as regras do topo do CORRECOES.md. Depois de cada um, rode build e testes e me mostre a prova de que fechou.
+Não mexa em ATENÇÃO nem em prontidão agora. Se uma correção depender de decisão minha, pare e pergunte.
+```
+
+### PA02 · Rotacionar chaves vazadas
+
+**Quando usar:** o relatório achou chave no código, no bundle do navegador ou no histórico do git. Tirar a chave do código não basta: quem copiou continua com ela.
+
+```text
+O check-report/RELATORIO.md apontou chaves expostas (C01 e C02). Me guie na troca de cada uma, sem nunca mostrar o valor de nenhuma chave no chat.
+Para cada chave:
+1. de qual provedor ela é e onde, no painel, gerar a nova;
+2. onde atualizar: variáveis de ambiente da hospedagem, Edge/Cloud Functions, CI e o .env local (que não vai para o git);
+3. como revogar a antiga e como confirmar que ela parou de funcionar;
+4. como testar que o app funciona com a nova.
+Depois, tire do código as chaves que estavam escritas nele e leia cada uma do ambiente (process.env, Deno.env ou equivalente). Chave de servidor nunca pode ter prefixo público (NEXT_PUBLIC_, VITE_, EXPO_PUBLIC_).
+Se a chave está no histórico do git, trocar a chave já resolve. Reescrever o histórico é opcional e só com o meu OK.
+No fim, rode de novo a busca de segredos do check-pre-lancamento.
+```
+
+### PA03 · Corrigir na ordem, uma task por vez
+
+**Quando usar:** sempre que o relatório tiver FALHA ou ATENÇÃO. É o prompt principal.
+
+```text
+Leia check-report/CORRECOES.md e aplique as correções na ordem, uma task por vez, seguindo as regras do topo do arquivo.
+Para cada task:
+1. Antes de mexer, me diga em até 3 linhas o que vai mudar, em quais arquivos e o que pode quebrar.
+2. Faça a menor mudança que resolve. Nada de refatoração fora da task.
+3. Rode o que o projeto tiver de build, lint, typecheck e testes. Se quebrar, conserte antes de seguir.
+4. Se o projeto usa git, faça um commit por task com a mensagem sugerida.
+5. O que for "Ação manual" é meu: anote e me entregue a lista no final.
+Pare e me pergunte antes de: mexer em permissão de banco (GRANT, REVOKE, policy, função), apagar dado, reescrever histórico do git ou decidir algo de produto.
+No fim, me mostre uma tabela com a task, o que foi feito e como você provou que funcionou.
+```
+
+### PA04 · Revisar as permissões do Supabase, tabela por tabela
+
+**Quando usar:** o app usa Supabase e o relatório marcou RLS, policies, grants, funções ou views. Este é o prompt que evita o erro mais comum: revogar o `anon` em massa e depois "consertar" devolvendo EXECUTE em todas as funções, o que reabre as internas.
+
+```text
+Quero revisar as permissões do banco Supabase sem quebrar o app. Até eu aprovar, é só leitura.
+1. Rode, ou me peça para rodar no SQL Editor, as três consultas da seção "Consulta de permissões" de references/stacks/baas.md da skill check-pre-lancamento. Salve o resultado em check-report/permissoes-antes.md: é o retrato de antes.
+2. Monte uma tabela com cada tabela, view e função do schema public: o que anon e authenticated podem fazer hoje, se a RLS está ligada, quais policies existem e o que o app realmente usa. Para saber o que o app usa, procure cada supabase.from('...') e supabase.rpc('...') no código e diga se roda antes ou depois do login.
+3. Proponha uma migration que deixa cada papel só com o que precisa:
+   - GRANT por tabela, nunca "on all tables";
+   - RLS ligada em todas as tabelas, com policies que checam o dono (auth.uid()) ou a organização;
+   - views com security_invoker = true;
+   - funções SECURITY DEFINER com set search_path = '' e EXECUTE revogado de public e de anon. Revogar só do anon não fecha: o Postgres dá EXECUTE a PUBLIC por padrão.
+4. Não devolva EXECUTE em massa ("grant execute on all functions in schema public"): as funções internas, fechadas de propósito, voltam a abrir. Conceda só as funções que o app chama por rpc(), uma a uma, e só ao papel que chama.
+5. Me mostre a migration e espere o meu OK. Depois de aplicada, teste com um visitante sem login e com duas contas logadas diferentes: a conta A não pode ler nem alterar dado da conta B.
+```
+
+### PA14 · Conferir de novo e comparar com a análise anterior
+
+**Quando usar:** depois de aplicar as correções.
+
+```text
+Antes de tudo, copie check-report/findings.json para check-report/findings-anterior.json. Depois rode o check-pre-lancamento de novo neste projeto.
+Com o relatório novo, me mostre:
+1. as notas antes e depois;
+2. o que fechou (com a prova), o que continua aberto e o que apareceu de novo;
+3. se alguma correção abriu outro problema (por exemplo, permissão devolvida em massa ou rota que perdeu a checagem de login).
+Não marque nada como OK sem evidência.
+```
+
+
 ## Cobertura desta análise
 
 O que foi olhado e o que ficou de fora. O que não foi olhado não está aprovado.
@@ -320,5 +399,5 @@ O que foi olhado e o que ficou de fora. O que não foi olhado não está aprovad
 - Fora do escopo: painel da Netlify e app mobile (não existe)
 
 ---
-Gerado pela skill **[check-pre-lancamento](https://github.com/dantaspaulo/check-pre-lancamento)** v2.0.0 · criada por **Paulo Sérgio Dantas** · [github.com/dantaspaulo](https://github.com/dantaspaulo)  
+Gerado pela skill **[check-pre-lancamento](https://github.com/dantaspaulo/check-pre-lancamento)** v2.1.0 · criada por **Paulo Sérgio Dantas** · [github.com/dantaspaulo](https://github.com/dantaspaulo)  
 Triagem automatizada + revisão de código por IA. Ajuda muito, mas não substitui pentest profissional em app que lida com dinheiro, saúde ou dado sensível em escala.

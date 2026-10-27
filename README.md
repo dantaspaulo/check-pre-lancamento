@@ -250,7 +250,9 @@ python3 skills/check-pre-lancamento/scripts/check_url.py https://meuapp.com.br
 | *"checa o projeto e o site https://meuapp.com.br"* | também headers, HTTPS, cookies, CORS, `/.env` exposto, JavaScript público, SEO e DNS de e-mail |
 | *"pode testar se o banco está aberto, o app é meu"* | conta quantas linhas do Supabase/Firebase um visitante lê sem login (só leitura) |
 | *"checa só o RLS"* · *"só os segredos"* · *"só a prontidão"* | só o que você pediu |
+| *"ignora a pasta arquivos-locais"* | tira a pasta das regras de código (o scanner já ignora o `.gitignore`, `docs/` e `examples/`) |
 | *"aplique as correções do CORRECOES.md"* | o agente corrige uma por vez, com build, teste e commit por task |
+| *"roda o PA04"* | o agente segue um dos [prompts prontos](PROMPTS.md) (o PA04 revisa as permissões do Supabase) |
 
 O resultado fica em `check-report/`:
 
@@ -269,6 +271,29 @@ Nota de segurança: 49/100 · Nota de prontidão: 60/100
 📄 **Veja o exemplo completo** (app fictício feito na Lovable): [RELATORIO.md](exemplos/RELATORIO.md) · [CORRECOES.md](exemplos/CORRECOES.md)
 
 <sub>No seu projeto, o relatório fica fora do git (`.git/info/exclude`) porque mapeia as falhas do app.</sub>
+
+<br/>
+
+<div align="center">
+
+## 🪄 Depois da análise: prompts prontos
+
+</div>
+
+O relatório termina com os prompts que combinam com o que foi achado. Copie, cole no seu agente aberto na pasta do projeto, e ele faz o próximo passo do jeito seguro. A lista completa está em **[PROMPTS.md](PROMPTS.md)**:
+
+| | Para quê |
+|---|---|
+| **PA01** | resolver hoje só o que impede o lançamento |
+| **PA02** | trocar as chaves que vazaram, sem nunca mostrar a chave no chat |
+| **PA03** | aplicar o `CORRECOES.md` na ordem, uma task por vez, com prova |
+| **PA04** | revisar as permissões do Supabase tabela por tabela, sem reabrir funções internas |
+| **PA05** | deixar uma regra fixa para a IA não reabrir o banco na próxima tabela |
+| **PA06** | provar com teste que um usuário não vê dado de outro |
+| **PA07** | fechar o cadastro: captcha, e-mail confirmado e senha forte |
+| **PA08** | escrever Termos de Uso e Política de Privacidade a partir do que o app coleta |
+| **PA09** a **PA12** | headers sem quebrar o site, dependências, backup testado, erro e queda com alerta |
+| **PA13** a **PA15** | checklist do dia do lançamento, conferir de novo comparando, explicar para quem não é técnico |
 
 <br/>
 
@@ -314,7 +339,7 @@ Nota de segurança: 49/100 · Nota de prontidão: 60/100
 - **Não altera nada durante a auditoria.** Escreve só a pasta `check-report/`. Correção, só se você pedir.
 - **Nunca mostra uma chave inteira.** O relatório, o JSON e o chat mostram só o começo da chave (`sk-pro…****`). Para ver o conteúdo de um arquivo, o agente usa um leitor que já mascara os valores.
 - **Teste de site é educado.** Só requisições normais, sem ataque, sem força bruta, só no seu domínio. A sondagem do banco é opcional, só lê e só roda com o seu OK.
-- **Código aberto para leitura.** Tudo em Python padrão, sem dependências, com [testes](tests/run_tests.py) que montam 11 projetos de exemplo a cada mudança.
+- **Código aberto para leitura.** Tudo em Python padrão, sem dependências, com [testes](tests/run_tests.py) que montam 15 projetos de exemplo a cada mudança.
 
 <br/>
 
@@ -334,6 +359,12 @@ Pode, inclusive comercialmente. O que a licença não deixa é vender ou republi
 
 **Funciona no Windows?**
 Funciona. Use `python` ou `py -3` em vez de `python3`. No `npx skills`, se o link der problema, use `--copy`.
+
+**Apareceu achado de pasta que não vai para o ar (docs, cópias locais, sincronização)?**
+O scanner já deixa de fora das regras de código o que está no `.gitignore` e as pastas `docs/` e `examples/` da raiz, e comentário não conta como código. Para outra pasta, peça ao agente para ignorá-la (`--ignorar pasta/`) ou crie na raiz um `.check-pre-lancamento-ignore` no formato do `.gitignore`. Chave secreta continua sendo procurada nessas pastas, e o relatório diz o que ficou de fora.
+
+**Meu app no Supabase começou a dar erro 42501 (permission denied) depois de 30/10/2026. E agora?**
+A partir de 30/10/2026, tabela nova no schema `public` nasce sem GRANT (em projeto criado depois de 30/05/2026, já era assim). Não resolva com GRANT em massa (`on all tables` ou `on all functions`): isso reabre as tabelas privadas e as funções internas. Dê GRANT tabela por tabela, só ao papel que precisa. Os prompts **PA04** e **PA05** fazem isso com você.
 
 **Como atualizar?**
 - Plugin do Claude Code: `/plugin marketplace update check-pre-lancamento`.

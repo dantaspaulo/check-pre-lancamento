@@ -58,6 +58,76 @@ def fence(text, lang=""):
     return f"{f}{lang}\n{text.strip()}\n{f}"
 
 
+# Correções que costumam abrir outro buraco. Quando o texto da correção traz uma delas, o relatório e o plano
+# ganham o aviso logo abaixo, para o agente que executar não precisar lembrar.
+CUIDADOS = (
+    (re.compile(r"grant\s+(?:all(?:\s+privileges)?|execute)\s+on\s+all\s+(?:functions|routines|procedures)\s+in\s+schema", re.I),
+     "Esta correção devolve EXECUTE em todas as funções do schema: as internas, fechadas de propósito, voltam a abrir. "
+     "Liste as funções que o app chama por rpc() e conceda só essas, uma a uma, só ao papel que chama."),
+    (re.compile(r"grant\s+[\w\s,()]+?\s+on\s+all\s+tables\s+in\s+schema\s+[\w\s,]+?\s+to\s+[\w\s,\"]*\b(?:anon|authenticated|public)\b", re.I),
+     "GRANT em todas as tabelas reabre também as privadas e as que ainda não têm RLS. Dê GRANT por tabela, só ao papel que precisa."),
+    (re.compile(r"revoke\s+[\w\s,()]+?\s+on\s+all\s+(?:tables|functions|routines|procedures)\s+in\s+schema\s+[\w\s,]+?\s+from\s+"
+                r"[\w\s,\"]*\b(?:anon|authenticated|public)\b", re.I),
+     "Revogação em massa: antes, salve o estado atual com a consulta de permissões (references/stacks/baas.md) e liste o que o app "
+     "usa sem login e logado (supabase.from e supabase.rpc). Depois devolva só o necessário, objeto por objeto, nunca em massa. "
+     "Em funções, o Postgres dá EXECUTE a PUBLIC por padrão: revogar só do anon não fecha."),
+    (re.compile(r"disable\s+row\s+level\s+security", re.I),
+     "Desligar a RLS deixa a tabela inteira aberta para quem tem GRANT nela. Isso nunca é a correção."),
+    (re.compile(r"\bdrop\s+(?:table|schema|database)\b|\btruncate\s+(?:table\s+)?[\w\"]", re.I),
+     "Este comando apaga dados. Só com backup conferido e o OK explícito do humano."),
+)
+
+
+def cuidados(*textos):
+    t = "\n".join(x for x in textos if x)
+    return [aviso for rx, aviso in CUIDADOS if rx.search(t)]
+
+
+def carregar_prompts():
+    """Lê references/prompts-pos-analise.md: [{id, titulo, quando, uso, texto}]."""
+    try:
+        txt = (SKILL_DIR / "references" / "prompts-pos-analise.md").read_text(encoding="utf-8").replace("\r\n", "\n")
+    except Exception:
+        return []
+    out = []
+    for m in re.finditer(r"(?ms)^## (PA\d{2}) · (.+?)\n(.*?)(?=^## PA\d{2} · |^---[ \t]*$|\Z)", txt):
+        corpo = m.group(3)
+        q = re.search(r"<!--\s*quando:\s*(.+?)\s*-->", corpo)
+        b = re.search(r"```text\n(.*?)\n```", corpo, re.S)
+        uso = re.search(r"\*\*Quando usar:\*\*\s*(.+)", corpo)
+        if b:
+            out.append({"id": m.group(1), "titulo": m.group(2).strip(), "quando": (q.group(1) if q else "sempre").lower(),
+                        "uso": uso.group(1).strip() if uso else "", "texto": b.group(1).strip()})
+    return out
+
+
+def escolher_prompts(lib, every, meta, maximo=5):
+    """Os prompts que combinam com o que ficou aberto (ou os pedidos em findings.json → "prompts")."""
+    por_id = {p["id"]: p for p in lib}
+    pedidos = meta.get("prompts") or []
+    pedidos = [str(x).strip().upper() for x in (re.split(r"[,\s]+", pedidos) if isinstance(pedidos, str) else pedidos) if str(x).strip()]
+    if pedidos:
+        return [por_id[i] for i in pedidos if i in por_id]
+    abertos = {c["id"] for c in every if c["status"] in ("FALHA", "ATENCAO")}
+    if not abertos:
+        return [p for p in lib if p["quando"].startswith("sempre")][:2]
+    critico = any(c["status"] == "FALHA" and c["severidade"] == "CRITICO" for c in every)
+    contexto = " ".join([meta.get("stack") or ""] + [(c.get("resumo") or "") + " " + (c.get("correcao") or "") for c in every]).lower()
+    escolhidos = []
+    for p in lib:
+        q = p["quando"]
+        se = re.search(r"\bse (\w+)", q)
+        if se and se.group(1) not in contexto:
+            continue
+        ids = {i.upper() for i in re.findall(r"\b[cp]\d{2}\b", q)}
+        if (q.startswith("critico") and critico) or (q.startswith("abertos") and p["id"] != "PA14") or ids & abertos:
+            escolhidos.append(p)
+    final = escolhidos[:maximo - 1]
+    if "PA14" in por_id:
+        final.append(por_id["PA14"])
+    return final
+
+
 def clean(x):
     if isinstance(x, str):
         return mask_secrets(x)
@@ -269,6 +339,8 @@ def render(meta, checks, pront, outdir):
                 L.append("")
             L.append(f"**Risco:** {c['risco'].strip()}\n")
             L.append(f"**Como corrigir:**\n\n{c['correcao'].strip()}\n")
+            for aviso in cuidados(c.get("correcao"), c.get("prompt")):
+                L.append(f"> ⚠️ **Cuidado:** {aviso}\n")
             if c.get("acao_manual"):
                 L.append(f"**Você precisa fazer (fora do código):** {c['acao_manual'].strip()}\n")
             L.append("**Prompt pronto para o agente (Claude, Codex, Cursor…):**\n")
@@ -318,6 +390,17 @@ def render(meta, checks, pront, outdir):
         L.append(f"{step}. Rode o check de novo para confirmar que tudo virou ✅.")
     else:
         L.append("1. Mantenha Dependabot/Renovate ativo e rode este check a cada release grande.")
+    sel = escolher_prompts(carregar_prompts(), every, meta)
+    if sel:
+        L.append("\n## Prompts prontos para o próximo passo\n")
+        L.append("Copie e cole no seu agente, aberto na pasta do projeto. No claude.ai ou em outro chat, anexe antes este relatório e o "
+                 f"`CORRECOES.md`. A lista completa está em [PROMPTS.md]({AUTORIA['repositorio']}/blob/main/PROMPTS.md).\n")
+        pasta = rel_dir.rstrip("/") + "/"
+        for p in sel:
+            L.append(f"### {p['id']} · {p['titulo']}\n")
+            if p["uso"]:
+                L.append(f"**Quando usar:** {p['uso']}\n")
+            L.append(fence(p["texto"].replace("check-report/", pasta), "text") + "\n")
     cob = meta.get("cobertura") or []
     if cob:
         L.append("\n## Cobertura desta análise\n")
@@ -347,7 +430,9 @@ def render(meta, checks, pront, outdir):
     C.append("6. Não reescreva histórico do git (filter-repo/BFG), não faça force push e não apague dados sem confirmação explícita do humano.")
     C.append("7. Se a correção depender de decisão de produto (essa rota deveria ser pública? esse campo pode ser editado pelo usuário?), pare e pergunte.")
     C.append("8. Prefira a menor mudança que resolve. Nada de refatoração não pedida.")
-    C.append("9. Ao terminar, rode o scanner de novo e atualize o relatório (veja \"Validação final\").\n")
+    C.append("9. Mudança de permissão no banco (GRANT, REVOKE, policy, função): antes, salve o estado atual; depois, teste com um "
+             "visitante sem login e com duas contas diferentes. Nunca devolva permissão em massa (`on all tables`, `on all functions`).")
+    C.append("10. Ao terminar, rode o scanner de novo e atualize o relatório (veja \"Validação final\").\n")
     if decisoes:
         C.append("## Antes de começar: decisões do humano\n")
         C.append("Pergunte ao humano e espere a resposta antes das tasks afetadas. Não decida por ele.\n")
@@ -386,6 +471,8 @@ def render(meta, checks, pront, outdir):
                 C.append("")
             C.append("**O que fazer:**\n")
             C.append(c["prompt"].strip() + "\n")
+            for aviso in cuidados(c.get("correcao"), c.get("prompt")):
+                C.append(f"> ⚠️ **Cuidado:** {aviso}\n")
             crit = c.get("criterios_aceite") or []
             if crit:
                 C.append("**Critério de aceite:**")

@@ -6,7 +6,7 @@ compatibility: "Scripts opcionais em Python 3.8+ só com biblioteca padrão (git
 metadata:
   author: "Paulo Sérgio Dantas"
   repository: "https://github.com/dantaspaulo/check-pre-lancamento"
-  version: "2.0.0"
+  version: "2.1.0"
   fingerprint: "CPL-PSD-2026"
 ---
 <!-- check-pre-lancamento · Copyright (c) 2026 Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0 (LICENSE.txt) · CPL-PSD-2026 -->
@@ -58,8 +58,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/check_url.py" <URL> --out <RAIZ>/check-repo
   - analisa migrations e regras (Supabase, Firebase, PocketBase, Appwrite, Convex);
   - aplica regras por framework (Laravel, Django, Rails, Spring, .NET, Go, Angular, mobile…);
   - coleta os sinais de prontidão;
-  - roda `npm`/`pnpm`/`yarn audit`, `pip-audit`, `composer audit`, `osv-scanner`, `govulncheck` e `bundle-audit` quando existem.
+  - roda `npm`/`pnpm`/`yarn`/`bun audit` (só produção, e separa o que é só de build e só de dev), `pip-audit`, `composer audit`, `osv-scanner`, `govulncheck` e `bundle-audit` quando existem.
   - Sem rede, use `--no-audit`. Com histórico gigante, `--no-git-history`, e registre em `limitacoes`.
+  - Comentário não dispara regra (código comentado não roda). O que o `.gitignore` ignora e as pastas fora do build (`docs/`, `examples/` na raiz) ficam fora das regras de código. Segredo continua sendo procurado em todas elas (no que o git ignora, com confiança baixa: não vai para o repositório, mas vaza se entrar no build). Para tirar outra pasta (cópias locais, sincronização, rascunhos), use `--ignorar pasta/` (repete ou separa por vírgula) ou um arquivo `.check-pre-lancamento-ignore` na raiz, no formato do `.gitignore`. `--varrer-tudo` desliga tudo isso. O que ficou de fora vem em `cobertura_do_scan` e em `avisos`, e vai para `cobertura` no `findings.json`.
 - **`check_url.py`** faz só GETs normais no domínio do usuário. Ele olha:
   - headers, cookies, CORS, redirect HTTP→HTTPS e certificado;
   - arquivos expostos (`/.env`, `/.git`, actuator, logs);
@@ -109,6 +110,8 @@ d. **Estado do build**: se as dependências já estão instaladas, rode o typech
 
 e. **O que não está no repo**: RLS sem migrations (C04), rate limit e WAF no edge (C11), headers e HTTPS sem URL (C18/C19), auditoria sem rede (C20), backup, SMTP e alertas de custo (P03, P06, P10). Se houver conector/MCP do Supabase, Vercel, Firebase ou Cloudflare, use só para leitura. Sem isso, marque ATENÇÃO e escreva em `acao_manual` o comando, a query ou o caminho exato no painel para o usuário conferir.
 
+f. **Permissões do banco (Supabase)**: as migrations não mostram os GRANTs que o próprio Supabase deu, nem o que foi mudado pelo painel. Com o OK do dono, rode as três consultas de `references/stacks/baas.md` → "Consulta de permissões" (só leitura, pelo MCP ou pedindo ao usuário que rode no SQL Editor). É assim que aparece o `anon` com GRANT em tudo e o privilégio padrão que abre todo objeto novo. A partir de 30/10/2026 a tabela nova nasce sem GRANT: o erro 42501 no app não se corrige com GRANT em massa.
+
 ## 4. Prontidão para o lançamento (P01–P10)
 
 Leia `references/prontidao.md`. São 10 itens que não são de segurança, mas derrubam lançamento:
@@ -143,7 +146,8 @@ Leia `references/report-format.md` (esquema, exemplos e como escrever bons promp
 - **Prompt autocontido**: o agente que for executar não viu esta análise. Diga os arquivos, o que mudar, as restrições e como verificar.
 - **Ordem real de execução**: use `depende_de` quando uma correção precisa de outra antes. O render respeita a dependência mesmo contra a severidade.
 - **Decisões de produto no topo**: perguntas que só o dono responde e que mudam várias correções vão em `decisoes_pendentes`.
-- **Cobertura honesta**: em `cobertura`, liste o que foi olhado e o que ficou de fora. O que não foi olhado não está aprovado.
+- **Cobertura honesta**: em `cobertura`, liste o que foi olhado e o que ficou de fora, inclusive as pastas que o scanner deixou fora das regras de código. O que não foi olhado não está aprovado.
+- **Prompts do próximo passo**: o `render_report.py` põe no fim do relatório os prompts de `references/prompts-pos-analise.md` que combinam com os itens abertos. Para escolher você mesmo, liste os IDs em `prompts`.
 
 ## 7. Gerar o relatório
 
@@ -166,8 +170,10 @@ Mensagem curta, nesta ordem:
 4. Onde estão `RELATORIO.md` e `CORRECOES.md`. Em ambiente sem acesso ao disco do usuário, envie os arquivos.
 5. Decisões pendentes, se houver: são elas que destravam as correções.
 6. Se não houve URL, lembre que vale rodar o check de novo com o site no ar (headers, HTTPS, e-mail do domínio e JavaScript público só se confirmam assim).
-7. Oferta: "Quer que eu já aplique as correções? Sigo o CORRECOES.md, uma por vez, com commit por task."
+7. Oferta: "Quer que eu já aplique as correções? Sigo o CORRECOES.md, uma por vez, com commit por task." Cite em uma linha os prompts prontos do fim do relatório (ex.: "PA04 revisa as permissões do Supabase e PA08 escreve Termos e Privacidade: é só pedir pelo número").
 8. Última linha, sempre: `check-pre-lancamento · skill de Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento`
+
+Se o usuário pedir um dos prompts pelo número (PA01 … PA15), leia o texto em `references/prompts-pos-analise.md` e siga.
 
 ## 9. Aplicar as correções (só se o usuário pedir)
 
@@ -176,6 +182,7 @@ Siga as regras do topo do `CORRECOES.md`:
 - nada de segredo em código;
 - ações manuais ficam com o humano;
 - nada destrutivo (reescrever histórico, force push, apagar dados) sem OK explícito;
+- permissão de banco (GRANT, REVOKE, policy, função): salve o estado antes, mude objeto por objeto e teste com visitante e com duas contas. Nunca devolva em massa: `grant execute on all functions` depois de revogar o `anon` reabre as funções internas;
 - pergunte quando depender de decisão de produto.
 
 No fim, rode o `scan.py` de novo, atualize os status no `findings.json`, regenere o relatório e mostre o antes → depois das notas.
@@ -185,6 +192,7 @@ No fim, rode o `scan.py` de novo, atualize os status no `findings.json`, regener
 - Segredo nunca aparece inteiro: nem no relatório, nem no chat, nem em commit. Mascare (6 primeiros caracteres + `…****`).
 - Teste em site só no domínio do próprio usuário, e só com requisições normais: nada de payload de exploração, força bruta, varredura de portas ou site de terceiros. `--sondar-dados` só com o OK explícito do dono do app.
 - Chave vazada exige rotação manual. Tirar do código não "desvaza".
+- Permissão de banco nunca se corrige em massa (`on all tables`, `on all functions`): objeto por objeto, só para o papel que precisa.
 - O que não deu pra verificar vai como ATENÇÃO, em `limitacoes` e em `cobertura`. Relatório honesto vale mais que nota alta.
 - Os créditos de autoria desta skill ficam onde estão.
 
@@ -204,4 +212,4 @@ No fim, rode o `scan.py` de novo, atualize os status no `findings.json`, regener
 | Mobile (Expo/RN/Flutter) e desktop (Electron/Tauri) | o app inteiro é cliente: chave no app é chave pública; `app.json` `extra`, `--dart-define`, AsyncStorage/SharedPreferences, `AndroidManifest.xml`, `Info.plist` |
 
 ---
-<sub>check-pre-lancamento v2.0.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0</sub>
+<sub>check-pre-lancamento v2.1.0 · por Paulo Sérgio Dantas · github.com/dantaspaulo/check-pre-lancamento · Licença de Uso com Atribuição v1.0</sub>

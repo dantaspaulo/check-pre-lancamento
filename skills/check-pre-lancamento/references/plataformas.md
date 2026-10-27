@@ -34,7 +34,9 @@ Com o código em mãos, siga o fluxo normal do SKILL.md. Sem ele, rode `check_ur
 **O que é:** React + Vite + TypeScript no front. O back fica no Supabase (integração ou Lovable Cloud, que roda sobre Supabase) e em Edge Functions.
 
 **O que costuma ficar aberto:**
-- **C04 RLS**: é a falha nº 1. Tabela criada pelo agente sem policy, ou policy `using (true)`. Rode `check_url.py --sondar-dados` (com OK) para provar o que um visitante lê, e as queries de RLS do `checks.md`.
+- **C04 RLS**: é a falha nº 1. Tabela criada pelo agente sem policy, ou policy `using (true)`. Rode `check_url.py --sondar-dados` (com OK) para provar o que um visitante lê, e a "Consulta de permissões" de `references/stacks/baas.md`: em projeto antigo, o `anon` tem GRANT de escrita em todas as tabelas e só a RLS segura.
+- **C04 a partir de 30/10/2026**: tabela nova criada pelo agente nasce sem GRANT, e o app dá erro 42501. Não aceite a correção "grant ... on all tables" ou "grant execute on all functions" que o agente propõe: peça GRANT por tabela, só ao papel que precisa (prompts PA04 e PA05).
+- **C20**: pacote de build instalado sem `-D` (como o `vite` e os plugins) cai em `dependencies` e aparece no `npm audit --omit=dev` como se fosse de produção. O scanner separa o que só roda no build (`vulnerabilidades_so_no_build`). Se o projeto só tem `bun.lockb`, ele usa `bun audit --prod`.
 - **C01/C03**: tudo em `src/` vai para o navegador. Chave da OpenAI, Stripe secret ou service role no front é falha. Segredo mora nos *secrets* das Edge Functions (`Deno.env.get`).
 - **C06**: Edge Function com `verify_jwt = false` em `supabase/config.toml` sem checar o usuário dentro dela (`edge_function_sem_jwt`).
 - **C12**: cadastro aberto sem captcha. O Supabase Auth tem captcha (hCaptcha/Turnstile) nas configurações de autenticação.
