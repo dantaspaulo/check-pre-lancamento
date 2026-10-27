@@ -1,0 +1,70 @@
+LICENÇA DE USO COM ATRIBUIÇÃO v1.0 · check-pre-lancamento
+Copyright (c) 2026 Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento
+Impressão da obra: CPL-PSD-2026
+
+Todos os direitos reservados, exceto o que esta licença concede expressamente.
+
+1. DEFINIÇÕES
+   "Obra": a skill check-pre-lancamento, ou seja, os textos, instruções, referências, scripts,
+   imagens e demais arquivos deste repositório, em qualquer versão.
+   "Autor": Paulo Sérgio Dantas.
+   "Avisos de autoria": o nome do Autor; o endereço https://github.com/dantaspaulo/check-pre-lancamento;
+   a impressão CPL-PSD-2026; as linhas "Copyright" e "Aviso obrigatório" no topo dos arquivos;
+   os metadados de autoria do SKILL.md; o manifesto AUTORIA.json; e o rodapé de crédito que os
+   scripts colocam nos relatórios e nas saídas.
+   "Derivado": qualquer versão modificada, traduzida, adaptada ou incorporada da Obra, no todo ou
+   em parte.
+
+2. O QUE VOCÊ PODE FAZER, DE GRAÇA
+   a) baixar, instalar e usar a Obra, inclusive com finalidade comercial, para auditar aplicativos
+      seus, da sua empresa ou dos seus clientes;
+   b) modificar a Obra para o seu próprio uso;
+   c) divulgar o link do repositório oficial;
+   d) entregar a terceiros os relatórios gerados pela Obra. Os relatórios são seus. Se você presta
+      serviço de auditoria a terceiros usando a Obra, mantenha no relatório entregue o rodapé de
+      crédito que ela gera.
+
+3. CONDIÇÕES PARA REDISTRIBUIR
+   Redistribuir é publicar ou repassar cópia da Obra ou de um Derivado, em qualquer meio:
+   repositório, fork público, pacote, marketplace de skills, curso, comunidade ou site.
+   Só é permitido se você cumprir TODAS as condições abaixo:
+   a) manter intactos todos os Avisos de autoria, inclusive as verificações de autoria dos scripts;
+   b) dar crédito visível, no início da descrição ou da página: "Baseado em check-pre-lancamento,
+      de Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento";
+   c) indicar com clareza o que foi modificado em relação à Obra;
+   d) distribuir sob esta mesma licença, com este arquivo incluído;
+   e) distribuir de graça.
+
+4. O QUE É PROIBIDO SEM AUTORIZAÇÃO ESCRITA DO AUTOR
+   a) vender, licenciar ou cobrar pela Obra ou por Derivado, sozinho ou dentro de produto ou
+      serviço pago (curso, mentoria, assinatura, pacote de skills, template, comunidade paga);
+   b) remover, alterar, esconder ou desativar Avisos de autoria;
+   c) apresentar a Obra ou um Derivado como criação própria ou de outra pessoa;
+   d) usar o nome do Autor para sugerir que ele endossa um produto ou serviço.
+
+5. TÉRMINO
+   Qualquer violação encerra automaticamente as permissões desta licença. Na primeira violação,
+   as permissões voltam se você corrigir tudo em até 30 dias depois de ser avisado pelo Autor.
+
+6. SEM GARANTIA
+   A Obra é fornecida "no estado em que se encontra", sem garantia de nenhum tipo. Ela faz triagem
+   automatizada e revisão de código por IA. Não substitui teste de intrusão profissional nem
+   assessoria jurídica. Na extensão máxima permitida pela lei, o Autor não responde por danos
+   decorrentes do uso ou da impossibilidade de uso da Obra.
+
+7. LEI APLICÁVEL E FORO
+   Esta licença se rege pelas leis da República Federativa do Brasil, em especial a Lei 9.610/1998
+   (direitos autorais) e a Lei 9.609/1998 (programa de computador). Fica eleito o foro da comarca
+   de Natal/RN.
+
+8. AUTORIZAÇÕES E CONTATO
+   Pedidos de autorização (uso em produto pago, parceria, outra licença): contato@paulosdantas.adv.br
+
+-------------------------------------------------------------------------------------------------
+ENGLISH SUMMARY (for convenience only; the Portuguese text above prevails)
+Free to use, including commercially, to audit your own or your clients' apps, and free to modify
+for your own use. Redistribution is allowed only free of charge, with every authorship notice
+intact (including the scripts' authorship checks), visible credit to Paulo Sérgio Dantas and
+https://github.com/dantaspaulo/check-pre-lancamento, changes clearly marked, and under this same
+license. Selling the work or derivatives, removing or altering credits, or claiming authorship is
+prohibited without written permission. No warranty. Governed by Brazilian law.

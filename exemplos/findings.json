@@ -1,0 +1,260 @@
+{
+  "projeto": "AgendaFácil (exemplo fictício)",
+  "data": "2026-10-27",
+  "stack": "Vite + React (Lovable) + Supabase + Netlify",
+  "escopo": "repo completo (branch main) + https://agendafacil.com.br, com --sondar-dados autorizado pelo dono",
+  "resumo_executivo": "O app está bem encaminhado, mas tem duas falhas que impedem o lançamento: a chave da OpenAI está no site e a tabela de agendamentos está aberta para qualquer visitante. As duas se corrigem em menos de uma hora. Na prontidão, o e-mail de confirmação não vai chegar sem SMTP próprio.",
+  "cobertura": [
+    "scan.py: 214 arquivos, histórico do git completo, npm audit executado",
+    "check_url.py: site publicado, DNS de e-mail e sondagem do Supabase (somente contagem)",
+    "Revisadas as 6 Edge Functions e as 9 telas que gravam dados",
+    "Fora do escopo: painel da Netlify e app mobile (não existe)"
+  ],
+  "decisoes_pendentes": [
+    "A função lembrete é chamada só pelo cron, ou também pelo app?"
+  ],
+  "checks": [
+    {
+      "id": "C01",
+      "status": "FALHA",
+      "severidade": "CRITICO",
+      "resumo": "Chave da OpenAI no bundle do navegador via VITE_OPENAI_API_KEY.",
+      "evidencias": [
+        "src/lib/ai.ts:4 — new OpenAI({ apiKey: import.meta.env.VITE_OPENAI_API_KEY, dangerouslyAllowBrowser: true })",
+        "https://agendafacil.com.br/assets/index-8f2c.js → sk-pro…****"
+      ],
+      "arquivos": [
+        "src/lib/ai.ts",
+        "supabase/functions/resumo/index.ts"
+      ],
+      "risco": "Qualquer visitante abre o DevTools, copia a chave e usa a sua conta da OpenAI à vontade, até estourar o limite do cartão.",
+      "correcao": "Mover a chamada para uma Edge Function do Supabase que lê `OPENAI_API_KEY` com `Deno.env.get`, exige usuário logado e tem limite por usuário. O front chama `supabase.functions.invoke('resumo')`.",
+      "prompt": "Em src/lib/ai.ts a OpenAI é instanciada no navegador com VITE_OPENAI_API_KEY e dangerouslyAllowBrowser. Crie supabase/functions/resumo/index.ts que valida o JWT do usuário (supabase.auth.getUser com o header Authorization), valida o body com zod (texto até 4.000 caracteres) e chama a OpenAI com Deno.env.get('OPENAI_API_KEY') e max_tokens 600. Troque a chamada em src/lib/ai.ts por supabase.functions.invoke('resumo'). Remova VITE_OPENAI_API_KEY do .env e do .env.example. Verifique: grep -rn \"VITE_OPENAI\\|dangerouslyAllowBrowser\" src vazio e npm run build passando. Não tente rotacionar a chave: é ação manual.",
+      "criterios_aceite": [
+        "Nenhuma referência a VITE_OPENAI_API_KEY em src/",
+        "A função recusa chamada sem login (401)"
+      ],
+      "acao_manual": "Rotacionar a chave na OpenAI (platform.openai.com → API keys) e cadastrar a nova com `supabase secrets set OPENAI_API_KEY=...`."
+    },
+    {
+      "id": "C02",
+      "status": "OK",
+      "resumo": "Nenhum arquivo sensível versionado; .gitignore cobre .env*; histórico limpo (gitleaks sem achados)."
+    },
+    {
+      "id": "C03",
+      "status": "OK",
+      "resumo": "O front usa só a chave pública do Supabase; nenhum service role no código do cliente."
+    },
+    {
+      "id": "C04",
+      "status": "FALHA",
+      "severidade": "CRITICO",
+      "resumo": "Tabela agendamentos sem RLS: 1.204 linhas visíveis para qualquer visitante.",
+      "evidencias": [
+        "supabase/migrations/20261003_init.sql:12 — create table public.agendamentos (sem enable row level security)",
+        "check_url.py --sondar-dados → agendamentos: 1.204 linhas visíveis sem login"
+      ],
+      "arquivos": [
+        "supabase/migrations/"
+      ],
+      "risco": "Qualquer pessoa, com a chave pública que está no site, lê nome, telefone e horário de todos os pacientes e pode apagar a agenda inteira.",
+      "correcao": "```sql\nalter table public.agendamentos enable row level security;\ncreate policy ag_select_own on public.agendamentos for select to authenticated using ((select auth.uid()) = clinica_id);\n```",
+      "prompt": "Crie a migration supabase/migrations/<timestamp>_rls_agendamentos.sql com: enable row level security em public.agendamentos; policies de select/insert/update/delete para authenticated restritas a (select auth.uid()) = clinica_id (with check igual em insert/update). Não aplique no banco: só gere o arquivo. Depois liste as telas que leem agendamentos e confirme que usam o cliente autenticado.",
+      "criterios_aceite": [
+        "agendamentos com RLS ligado",
+        "Visitante sem login recebe 0 linhas"
+      ],
+      "acao_manual": "Aplicar a migration (supabase db push) e rodar de novo o check com --sondar-dados para ver 0 linhas."
+    },
+    {
+      "id": "C05",
+      "status": "OK",
+      "resumo": "Sem dado de cartão; telefone guardado com RLS (após a correção do C04)."
+    },
+    {
+      "id": "C06",
+      "status": "ATENCAO",
+      "severidade": "ALTO",
+      "resumo": "Edge Function lembrete com verify_jwt = false e sem checagem de usuário no código.",
+      "evidencias": [
+        "supabase/config.toml:8 — [functions.lembrete] verify_jwt = false"
+      ],
+      "arquivos": [
+        "supabase/functions/lembrete/index.ts",
+        "supabase/config.toml"
+      ],
+      "risco": "Qualquer um chama a função e dispara lembretes por WhatsApp para a lista inteira, gastando os seus créditos.",
+      "correcao": "Se a função é chamada só pelo cron, exigir um segredo no header (comparação em tempo constante). Se é chamada pelo app, voltar verify_jwt = true.",
+      "prompt": "Em supabase/functions/lembrete/index.ts, exija o header x-cron-secret igual a Deno.env.get('CRON_SECRET') usando comparação em tempo constante e responda 401 caso contrário. Mantenha verify_jwt = false só se o cron não mandar JWT. Verifique com curl sem header: deve dar 401.",
+      "acao_manual": "Cadastrar CRON_SECRET com supabase secrets set e no agendador."
+    },
+    {
+      "id": "C07",
+      "status": "OK",
+      "resumo": "Todas as leituras usam o cliente autenticado; RLS (após C04) filtra por clínica."
+    },
+    {
+      "id": "C08",
+      "status": "OK",
+      "resumo": "Updates do front só mexem em colunas liberadas (grant update por coluna)."
+    },
+    {
+      "id": "C09",
+      "status": "OK",
+      "resumo": "Sessão gerenciada pelo supabase-js em SPA (padrão aceito); sem token próprio."
+    },
+    {
+      "id": "C10",
+      "status": "OK",
+      "resumo": "Senhas gerenciadas pelo Supabase Auth."
+    },
+    {
+      "id": "C11",
+      "status": "FALHA",
+      "severidade": "ALTO",
+      "depende_de": [
+        "C01"
+      ],
+      "resumo": "Função de resumo com IA sem limite por usuário.",
+      "risco": "Um script chama a função milhares de vezes e a conta da OpenAI explode em uma noite.",
+      "correcao": "Limite de 20 resumos por usuário por dia, guardado numa tabela de uso, e max_tokens na chamada.",
+      "prompt": "Na Edge Function resumo (criada na task do C01), antes de chamar a OpenAI, conte as chamadas do usuário nas últimas 24 h numa tabela public.uso_ia (user_id, criado_em) com RLS; acima de 20, responda 429. Registre cada chamada. Verifique: a 21ª chamada do mesmo usuário recebe 429."
+    },
+    {
+      "id": "C12",
+      "status": "OK",
+      "resumo": "Captcha do Supabase Auth (Turnstile) ligado no cadastro."
+    },
+    {
+      "id": "C13",
+      "status": "NA",
+      "resumo": "Sem SQL próprio: todas as consultas passam pelo supabase-js."
+    },
+    {
+      "id": "C14",
+      "status": "OK",
+      "resumo": "Formulários validados com zod no front e checagem no banco; sem HTML dinâmico."
+    },
+    {
+      "id": "C15",
+      "status": "OK",
+      "resumo": "Sem source maps públicos; erros genéricos na tela."
+    },
+    {
+      "id": "C16",
+      "status": "NA",
+      "resumo": "O app não tem upload de arquivos."
+    },
+    {
+      "id": "C17",
+      "status": "OK",
+      "resumo": "Listagens com .range() e colunas explícitas."
+    },
+    {
+      "id": "C18",
+      "status": "FALHA",
+      "severidade": "MEDIO",
+      "resumo": "Site publicado sem CSP, sem X-Frame-Options e sem nosniff (check_url.py).",
+      "risco": "Sem CSP, um XSS vira roubo de sessão; sem anti-clickjacking, o site pode ser embutido num iframe malicioso.",
+      "correcao": "Adicionar headers no netlify.toml (bloco [[headers]]) ou no provedor de hospedagem.",
+      "prompt": "Crie ou edite netlify.toml com [[headers]] for = \"/*\" contendo Content-Security-Policy (default-src 'self'; connect-src 'self' https://*.supabase.co; frame-ancestors 'none'), X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin e Permissions-Policy camera=(), microphone=(), geolocation=(). Teste no navegador que o login continua funcionando."
+    },
+    {
+      "id": "C19",
+      "status": "OK",
+      "resumo": "HTTP redireciona para HTTPS com 301; HSTS ativo pela Netlify."
+    },
+    {
+      "id": "C20",
+      "status": "OK",
+      "resumo": "npm audit sem vulnerabilidade alta ou crítica; lockfile versionado; Dependabot ativo."
+    }
+  ],
+  "prontidao": [
+    {
+      "id": "P01",
+      "status": "OK",
+      "resumo": "Variáveis do código documentadas no .env.example; sem localhost no cliente."
+    },
+    {
+      "id": "P02",
+      "status": "ATENCAO",
+      "severidade": "ALTO",
+      "resumo": "Nenhum monitoramento de erro: erro em produção passa sem ninguém ver.",
+      "risco": "No dia do lançamento, um erro na tela de agendamento derruba as marcações e você só fica sabendo pelo WhatsApp dos clientes.",
+      "correcao": "Instalar o Sentry no front (@sentry/react) com alerta por e-mail.",
+      "prompt": "Instale @sentry/react, inicialize em src/main.tsx com o DSN de VITE_SENTRY_DSN, envolva o App num Sentry.ErrorBoundary com uma tela de erro amigável e configure beforeSend para remover e-mail e telefone. Verifique: npm run build passando."
+    },
+    {
+      "id": "P03",
+      "status": "ATENCAO",
+      "severidade": "ALTO",
+      "resumo": "Projeto no plano gratuito do Supabase: sem backup diário conferido.",
+      "risco": "Um delete errado apaga a agenda de todas as clínicas sem caminho de volta.",
+      "correcao": "Subir para um plano com backup diário ou agendar `supabase db dump` para um bucket externo.",
+      "prompt": "Crie .github/workflows/backup.yml que roda diariamente supabase db dump e envia o arquivo para um bucket (credenciais em secrets do GitHub). Não coloque nenhuma credencial no arquivo.",
+      "acao_manual": "Conferir em Supabase → Database → Backups e testar uma restauração."
+    },
+    {
+      "id": "P04",
+      "status": "OK",
+      "resumo": "Migrations versionadas em supabase/migrations; build no CI a cada push."
+    },
+    {
+      "id": "P05",
+      "status": "NA",
+      "resumo": "Hospedagem estática na Netlify com certificado automático; monitor de uptime fica como melhoria."
+    },
+    {
+      "id": "P06",
+      "status": "FALHA",
+      "severidade": "ALTO",
+      "resumo": "Confirmação de cadastro pelo SMTP padrão do Supabase; domínio sem DMARC.",
+      "evidencias": [
+        "supabase/config.toml sem [auth.email.smtp]",
+        "check_url.py → agendafacil.com.br sem DMARC"
+      ],
+      "risco": "No lançamento, o e-mail de confirmação não chega (o SMTP padrão é só para teste) e as pessoas não conseguem entrar.",
+      "correcao": "Configurar a Resend como SMTP no Supabase e publicar SPF, DKIM e DMARC.",
+      "prompt": "Liste ao humano os passos: criar conta na Resend, verificar o domínio, publicar os registros DNS mostrados e _dmarc com p=quarantine, e preencher Authentication → SMTP Settings no Supabase. Depois traduza os templates de e-mail do Supabase Auth para português.",
+      "acao_manual": "DNS no Registro.br e SMTP no painel do Supabase."
+    },
+    {
+      "id": "P07",
+      "status": "OK",
+      "resumo": "Política de privacidade e termos no rodapé e no cadastro; exclusão de conta em Configurações."
+    },
+    {
+      "id": "P08",
+      "status": "FALHA",
+      "severidade": "MEDIO",
+      "resumo": "index.html com o título e a imagem de compartilhamento do template (\"Lovable App\").",
+      "evidencias": [
+        "index.html:5 — <title>Lovable App</title>",
+        "index.html:8 — og:image de lovable.dev"
+      ],
+      "risco": "No Google e no WhatsApp o link aparece como \"Lovable App\", com a imagem da plataforma: parece golpe e derruba o clique.",
+      "correcao": "Título, descrição, og:image próprios e lang=\"pt-BR\".",
+      "prompt": "Em index.html troque o title para \"AgendaFácil · agenda online para clínicas\", a meta description, og:title, og:description e og:image (public/og.png, 1200×630) e defina <html lang=\"pt-BR\">. Verifique com npm run build."
+    },
+    {
+      "id": "P09",
+      "status": "OK",
+      "resumo": "LCP de 1,9 s no PageSpeed (celular); imagens em WebP."
+    },
+    {
+      "id": "P10",
+      "status": "ATENCAO",
+      "severidade": "ALTO",
+      "depende_de": [
+        "C11"
+      ],
+      "resumo": "Sem limite de gasto configurado na OpenAI.",
+      "risco": "Mesmo com o limite por usuário, um pico no lançamento pode gerar uma fatura alta.",
+      "correcao": "Definir um orçamento mensal e um alerta na OpenAI.",
+      "prompt": "Nada a mudar no código. Liste ao humano: OpenAI → Settings → Limits, orçamento mensal e alerta em 50% e 80%.",
+      "acao_manual": "Configurar o orçamento na OpenAI."
+    }
+  ]
+}

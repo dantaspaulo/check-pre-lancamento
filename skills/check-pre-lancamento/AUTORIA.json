@@ -1,0 +1,27 @@
+{
+  "skill": "check-pre-lancamento",
+  "versao": "2.0.0",
+  "autor": "Paulo Sérgio Dantas",
+  "repositorio": "https://github.com/dantaspaulo/check-pre-lancamento",
+  "licenca": "Licença de Uso com Atribuição v1.0 (LICENSE.txt)",
+  "impressao": "CPL-PSD-2026",
+  "arquivos": {
+    "LICENSE.txt": "c695eed9470840592aed38d4309e2694a480f02607bc7fb8bf6f83e3e9ca24d1",
+    "SKILL.md": "72a190f136828b1930304d30e4430c365f4a921dfa6f46057ef6b83c0a5e77d8",
+    "references/checks.md": "a8b6f17132701d9176b232de3b21796c516dac7cc61d996973b88feded242319",
+    "references/plataformas.md": "2470a6c1f57d3901d3b2cc3dad2b658499e592a045fc2e53c94bad4a2a59c870",
+    "references/prontidao.md": "f5d1f8970410867b1c404c200b7943e2e1517dcc264b03947d37235943cf2df8",
+    "references/report-format.md": "0fb192b3d6c1ee56625dd47486a7e9c1e5be29ff2c802d9df776d6b93a12183a",
+    "references/stacks/baas.md": "74766f9fc74758de3f4a0ec1d6d79812e855a1371e9c8bf31a5c4709702edbca",
+    "references/stacks/back-java-dotnet-go.md": "365259a3ed7f665534dc3fbc1249f17265a5ee06f3eaa8caa917cd840fc66181",
+    "references/stacks/back-js.md": "eca7497e7aa26fa7a152384a3b9f0493e821935044b8288e82e325e8dc4b0d52",
+    "references/stacks/back-php-python-ruby.md": "a159e60e0a6cb6b9256eabfe3a2f66e592a4d5381203c1dd0a0a49743a66e26c",
+    "references/stacks/front-e-mobile.md": "60e981d0abf5a58669873feea2b6c62d086f04e9bfb24fbd7aab8b360ff26a3d",
+    "scripts/_common.py": "f24821b4d7a16fc9c33424edd0b6c24cfe943d7655ae2a05db1c72ffa6d1e53b",
+    "scripts/autoria.py": "28af34963cf77cad9b396ace57883222b6edf3e0dc2160cf57e92d655f82d901",
+    "scripts/check_url.py": "830206283831d441b2803626a70283476f514c2c930f05acbf110c94816249c6",
+    "scripts/render_report.py": "133b318ecc8167e3fad9075b9d97b613a29c00ada1f2719abf2b680ecd4f7e7f",
+    "scripts/scan.py": "e3ae19c63ec8fdfb0aeb4fb8a1e3748ce9438afc29938647ce6af85e3db2675b",
+    "scripts/show.py": "effef1b5b69b0f2a1e61514d732dfce28d9cad5ebffefff11f76c3ee8efc89b8"
+  }
+}

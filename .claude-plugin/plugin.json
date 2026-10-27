@@ -1,0 +1,14 @@
+{
+  "name": "check-pre-lancamento",
+  "version": "2.0.0",
+  "description": "Check pré-lançamento de apps: 20 checagens de segurança + 10 de prontidão, com nota, veredito, relatório e correções prontas para o agente aplicar. Por Paulo Sérgio Dantas.",
+  "author": {
+    "name": "Paulo Sérgio Dantas",
+    "email": "contato@paulosdantas.adv.br",
+    "url": "https://github.com/dantaspaulo"
+  },
+  "homepage": "https://github.com/dantaspaulo/check-pre-lancamento",
+  "repository": "https://github.com/dantaspaulo/check-pre-lancamento",
+  "license": "LicenseRef-Uso-com-Atribuicao-1.0",
+  "keywords": ["seguranca", "pre-lancamento", "auditoria", "supabase", "lovable", "nextjs", "laravel", "lgpd", "owasp"]
+}

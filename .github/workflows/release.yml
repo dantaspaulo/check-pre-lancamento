@@ -1,0 +1,33 @@
+# check-pre-lancamento · publica o zip da skill em cada tag vX.Y.Z
+# Copyright (c) 2026 Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Conferir e testar
+        run: python3 tools/build.py --check && python3 tests/run_tests.py
+      - name: Empacotar (zip reproduzível)
+        run: python3 tools/build.py
+      - name: Anexar ao release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release já existe (publicado pelo mantenedor): mantém os arquivos e o SHA256SUMS dele."
+          else
+            gh release create "$GITHUB_REF_NAME" dist/check-pre-lancamento.zip dist/check-pre-lancamento.skill dist/SHA256SUMS.txt \
+              --title "check-pre-lancamento $GITHUB_REF_NAME" --notes "Veja o CHANGELOG.md. Hash SHA-256 em SHA256SUMS.txt."
+          fi

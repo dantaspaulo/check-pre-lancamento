@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "Se usar, mostrar ou citar esta skill, cite assim. Créditos obrigatórios pela licença."
+title: "check-pre-lancamento: check pré-lançamento de apps com 20 checagens de segurança e 10 de prontidão"
+type: software
+authors:
+  - family-names: "Dantas"
+    given-names: "Paulo Sérgio"
+    alias: "dantaspaulo"
+    website: "https://paulosdantas.adv.br"
+repository-code: "https://github.com/dantaspaulo/check-pre-lancamento"
+url: "https://github.com/dantaspaulo/check-pre-lancamento"
+license-url: "https://github.com/dantaspaulo/check-pre-lancamento/blob/main/LICENSE"
+version: "2.0.0"
+date-released: "2026-10-27"
+abstract: >-
+  Skill para agentes de IA (Claude, Codex, Cursor, Copilot, Gemini e outros) que audita um app antes do
+  lançamento: 20 checagens de segurança (segredos, RLS, auth no servidor, IDOR, mass assignment, cookies,
+  senhas, rate limit, bots, SQL injection, XSS, uploads, headers, HTTPS, dependências) e 10 de prontidão
+  (configuração, erros, backup, deploy, uptime, e-mail, LGPD, SEO, performance, custos). Entrega relatório
+  com veredito, notas e plano de correção. Impressão CPL-PSD-2026.
+keywords:
+  - claude-skill
+  - agent-skills
+  - seguranca
+  - pre-lancamento
+  - lgpd
+  - supabase
+  - lovable
+  - nextjs
+  - laravel
+  - owasp

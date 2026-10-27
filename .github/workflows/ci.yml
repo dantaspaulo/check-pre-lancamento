@@ -1,0 +1,27 @@
+# check-pre-lancamento · CI: testes e trava de autoria
+# Copyright (c) 2026 Paulo Sérgio Dantas · https://github.com/dantaspaulo/check-pre-lancamento
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Créditos de autoria e manifesto em dia
+        run: python3 tools/build.py --check
+      - name: Testes do scanner, do check_url e do relatório
+        run: python3 tests/run_tests.py
